@@ -1,6 +1,8 @@
 const std = @import("std");
 const Io = std.Io;
 
+pub const std_options: std.Options = .{ .log_level = .warn };
+
 const dockpit = @import("dockpit");
 
 pub fn main(init: std.process.Init) !void {
