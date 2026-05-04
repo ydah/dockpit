@@ -3,6 +3,8 @@ const vaxis = @import("vaxis");
 const vxfw = vaxis.vxfw;
 
 const app_state = @import("../core/app_state.zig");
+const log_buffer = @import("../core/log_buffer.zig");
+const runner = @import("../core/runner.zig");
 const task = @import("../core/task.zig");
 const layout = @import("layout.zig");
 const widgets = @import("widgets.zig");
@@ -22,6 +24,9 @@ pub fn run(
     defer state.deinit();
 
     var root = RootWidget{
+        .allocator = allocator,
+        .io = io,
+        .env_map = env_map,
         .state = &state,
     };
 
@@ -29,6 +34,9 @@ pub fn run(
 }
 
 const RootWidget = struct {
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    env_map: *std.process.Environ.Map,
     state: *app_state.AppState,
 
     fn widget(self: *RootWidget) vxfw.Widget {
@@ -64,13 +72,57 @@ const RootWidget = struct {
                 }
                 if (key.matches(vaxis.Key.enter, .{})) {
                     if (self.state.selectedTask()) |selected| {
-                        self.state.dispatch(.{ .set_status = selected.id });
+                        try self.runTask(selected);
                     }
+                    ctx.consumeAndRedraw();
+                    return;
+                }
+                if (key.matches('r', .{})) {
+                    if (self.lastTask()) |last| {
+                        try self.runTask(last);
+                    }
+                    ctx.consumeAndRedraw();
+                    return;
+                }
+                if (key.matches('c', .{})) {
+                    self.state.dispatch(.clear_log);
+                    self.state.dispatch(.{ .set_status = "log cleared" });
                     ctx.consumeAndRedraw();
                 }
             },
             else => {},
         }
+    }
+
+    fn runTask(self: *RootWidget, selected: task.TaskSpec) !void {
+        self.state.dispatch(.{ .set_last_task = selected.id });
+        self.state.dispatch(.{ .set_status = "running" });
+
+        const command_line = try formatCommand(self.allocator, selected.argv);
+        try self.state.log.push(.system, command_line, timestampMs(self.io));
+
+        const result = runner.runTask(self.allocator, self.io, selected, self.env_map) catch |err| {
+            try self.state.log.push(.stderr, @errorName(err), timestampMs(self.io));
+            self.state.dispatch(.{ .set_status = "failed to start" });
+            return;
+        };
+
+        try appendOutputLines(&self.state.log, .stdout, result.stdout, self.io);
+        try appendOutputLines(&self.state.log, .stderr, result.stderr, self.io);
+
+        const status = if (result.exitCode()) |code|
+            try std.fmt.allocPrint(self.allocator, "exit {d}", .{code})
+        else
+            "signal";
+        self.state.dispatch(.{ .set_status = status });
+    }
+
+    fn lastTask(self: *RootWidget) ?task.TaskSpec {
+        const task_id = self.state.last_task_id orelse return null;
+        for (self.state.tasks) |item| {
+            if (std.mem.eql(u8, item.id, task_id)) return item;
+        }
+        return null;
     }
 
     fn drawErased(ptr: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.Surface {
@@ -133,8 +185,41 @@ const RootWidget = struct {
         const status = if (self.state.status_message.len > 0) self.state.status_message else "ready";
         widgets.writeTextClipped(surface, rect.y + 1, rect.x + 2, self.state.project_root, rect.width - 4);
         if (rect.height > 2) {
-            widgets.writeTextClipped(surface, rect.y + 2, rect.x + 2, "Enter select  j/k move  q quit  status: ", rect.width - 4);
-            widgets.writeTextClipped(surface, rect.y + 2, rect.x + 43, status, rect.width - 4);
+            widgets.writeTextClipped(surface, rect.y + 2, rect.x + 2, "Enter run  r rerun  c clear  j/k move  q quit", rect.width - 4);
+            widgets.writeTextClipped(surface, rect.y + 2, rect.x + 58, status, rect.width - 4);
         }
     }
 };
+
+fn formatCommand(allocator: std.mem.Allocator, argv: []const []const u8) ![]const u8 {
+    var command: std.ArrayList(u8) = .empty;
+    errdefer command.deinit(allocator);
+
+    try command.append(allocator, '$');
+    for (argv) |arg| {
+        try command.append(allocator, ' ');
+        try command.appendSlice(allocator, arg);
+    }
+
+    return command.toOwnedSlice(allocator);
+}
+
+fn appendOutputLines(
+    log: *log_buffer.LogBuffer,
+    kind: log_buffer.LogKind,
+    contents: []const u8,
+    io: std.Io,
+) !void {
+    if (contents.len == 0) return;
+
+    var lines = std.mem.splitScalar(u8, contents, '\n');
+    while (lines.next()) |raw_line| {
+        const line = std.mem.trim(u8, raw_line, "\r");
+        if (line.len == 0) continue;
+        try log.push(kind, line, timestampMs(io));
+    }
+}
+
+fn timestampMs(io: std.Io) u64 {
+    return @intCast(std.Io.Timestamp.now(io, .real).toMilliseconds());
+}
