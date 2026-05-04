@@ -16,6 +16,8 @@ pub const Mode = enum {
     log_search,
     palette,
     help,
+    jobs,
+    history,
 };
 
 pub const Action = union(enum) {

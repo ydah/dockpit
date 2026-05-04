@@ -34,6 +34,8 @@ pub const KeyBindings = struct {
     palette: []const u8 = ":",
     focus: []const u8 = "tab",
     help: []const u8 = "?",
+    jobs: []const u8 = "J",
+    history: []const u8 = "h",
     quit: []const u8 = "q",
 };
 

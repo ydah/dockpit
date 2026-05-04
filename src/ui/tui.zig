@@ -41,8 +41,11 @@ pub fn run(
         .git_enabled = git_enabled,
         .state = &state,
         .settings = settings,
+        .task_statuses = try allocator.alloc(TaskStatus, tasks.len),
     };
     defer root.deinit();
+    @memset(root.task_statuses, .{});
+    try root.refreshHistory();
 
     try app.run(root.widget(), .{});
 }
@@ -54,8 +57,12 @@ const RootWidget = struct {
     git_enabled: bool,
     state: *app_state.AppState,
     settings: config.Settings,
+    task_statuses: []TaskStatus,
+    history_entries: []history.Entry = &.{},
     jobs: std.ArrayList(*RunningJob) = .empty,
     next_job_id: usize = 1,
+    selected_job_index: usize = 0,
+    selected_history_index: usize = 0,
     palette_index: usize = 0,
     watch_enabled: bool = false,
     watch_snapshot: ?watch.Snapshot = null,
@@ -70,6 +77,8 @@ const RootWidget = struct {
             self.allocator.destroy(job);
         }
         self.jobs.deinit(self.allocator);
+        self.freeHistoryEntries();
+        self.allocator.free(self.task_statuses);
     }
 
     fn widget(self: *RootWidget) vxfw.Widget {
@@ -88,6 +97,8 @@ const RootWidget = struct {
     fn handleEvent(self: *RootWidget, ctx: *vxfw.EventContext, event: vxfw.Event) !void {
         switch (event) {
             .key_press => |key| {
+                if (try self.handleJobsKey(ctx, key)) return;
+                if (try self.handleHistoryKey(ctx, key)) return;
                 if (self.handleHelpKey(ctx, key)) return;
                 if (self.handleSearchKey(ctx, key)) return;
                 if (self.handleLogSearchKey(ctx, key)) return;
@@ -113,6 +124,22 @@ const RootWidget = struct {
                     self.state.dispatch(.exit_mode);
                     self.state.mode = .help;
                     self.state.dispatch(.{ .set_status = "help" });
+                    ctx.consumeAndRedraw();
+                    return;
+                }
+                if (matchesBinding(key, self.settings.keybindings.jobs)) {
+                    self.state.dispatch(.exit_mode);
+                    self.state.mode = .jobs;
+                    self.clampSelectedJob();
+                    self.state.dispatch(.{ .set_status = "jobs" });
+                    ctx.consumeAndRedraw();
+                    return;
+                }
+                if (matchesBinding(key, self.settings.keybindings.history)) {
+                    self.state.dispatch(.exit_mode);
+                    self.state.mode = .history;
+                    self.clampSelectedHistory();
+                    self.state.dispatch(.{ .set_status = "history" });
                     ctx.consumeAndRedraw();
                     return;
                 }
@@ -196,6 +223,77 @@ const RootWidget = struct {
             .tick => try self.handleTick(ctx),
             else => {},
         }
+    }
+
+    fn handleJobsKey(self: *RootWidget, ctx: *vxfw.EventContext, key: vaxis.Key) !bool {
+        if (self.state.mode != .jobs) return false;
+
+        if (key.matches(vaxis.Key.escape, .{}) or
+            key.matches('c', .{ .ctrl = true }) or
+            matchesBinding(key, self.settings.keybindings.quit) or
+            matchesBinding(key, self.settings.keybindings.jobs))
+        {
+            self.state.dispatch(.exit_mode);
+            self.state.dispatch(.{ .set_status = "ready" });
+            ctx.consumeAndRedraw();
+            return true;
+        }
+        if (key.matches('j', .{}) or key.matches(vaxis.Key.down, .{})) {
+            if (self.selected_job_index + 1 < self.jobs.items.len) self.selected_job_index += 1;
+            ctx.consumeAndRedraw();
+            return true;
+        }
+        if (key.matches('k', .{}) or key.matches(vaxis.Key.up, .{})) {
+            if (self.selected_job_index > 0) self.selected_job_index -= 1;
+            ctx.consumeAndRedraw();
+            return true;
+        }
+        if (matchesBinding(key, self.settings.keybindings.cancel)) {
+            self.requestCancelSelected();
+            ctx.consumeAndRedraw();
+            return true;
+        }
+
+        ctx.consumeAndRedraw();
+        return true;
+    }
+
+    fn handleHistoryKey(self: *RootWidget, ctx: *vxfw.EventContext, key: vaxis.Key) !bool {
+        if (self.state.mode != .history) return false;
+
+        if (key.matches(vaxis.Key.escape, .{}) or
+            key.matches('c', .{ .ctrl = true }) or
+            matchesBinding(key, self.settings.keybindings.quit) or
+            matchesBinding(key, self.settings.keybindings.history))
+        {
+            self.state.dispatch(.exit_mode);
+            self.state.dispatch(.{ .set_status = "ready" });
+            ctx.consumeAndRedraw();
+            return true;
+        }
+        if (key.matches('j', .{}) or key.matches(vaxis.Key.down, .{})) {
+            if (self.selected_history_index + 1 < self.history_entries.len) self.selected_history_index += 1;
+            ctx.consumeAndRedraw();
+            return true;
+        }
+        if (key.matches('k', .{}) or key.matches(vaxis.Key.up, .{})) {
+            if (self.selected_history_index > 0) self.selected_history_index -= 1;
+            ctx.consumeAndRedraw();
+            return true;
+        }
+        if (key.matches(vaxis.Key.enter, .{}) or matchesBinding(key, self.settings.keybindings.rerun)) {
+            if (self.selectedHistoryTask()) |item| {
+                try self.startTask(ctx, item);
+                self.state.dispatch(.exit_mode);
+            } else {
+                self.state.dispatch(.{ .set_status = "task missing" });
+            }
+            ctx.consumeAndRedraw();
+            return true;
+        }
+
+        ctx.consumeAndRedraw();
+        return true;
     }
 
     fn handleSearchKey(self: *RootWidget, ctx: *vxfw.EventContext, key: vaxis.Key) bool {
@@ -341,6 +439,18 @@ const RootWidget = struct {
             .refresh_git => self.refreshGit(),
             .show_worktrees => try self.showWorktrees(),
             .toggle_watch => try self.toggleWatch(ctx),
+            .show_jobs => {
+                self.state.dispatch(.exit_mode);
+                self.state.mode = .jobs;
+                self.clampSelectedJob();
+                self.state.dispatch(.{ .set_status = "jobs" });
+            },
+            .show_history => {
+                self.state.dispatch(.exit_mode);
+                self.state.mode = .history;
+                self.clampSelectedHistory();
+                self.state.dispatch(.{ .set_status = "history" });
+            },
             .search_tasks => {
                 self.state.dispatch(.enter_search);
                 self.state.dispatch(.{ .set_status = "search" });
@@ -359,8 +469,15 @@ const RootWidget = struct {
     fn startTask(self: *RootWidget, ctx: *vxfw.EventContext, selected: task.TaskSpec) !void {
         try self.finishCompletedJobs();
 
+        const task_index = self.taskIndexById(selected.id);
         self.state.dispatch(.{ .set_last_task = selected.id });
         self.state.dispatch(.{ .set_status = "running" });
+        if (task_index) |index| {
+            self.task_statuses[index] = .{
+                .state = .running,
+                .job_id = self.next_job_id,
+            };
+        }
 
         const command_line = try formatCommand(self.allocator, selected.argv);
         defer self.allocator.free(command_line);
@@ -373,6 +490,7 @@ const RootWidget = struct {
             .io = self.io,
             .env_map = self.env_map,
             .task_spec = selected,
+            .task_index = task_index,
         };
         self.next_job_id += 1;
         job.thread = try std.Thread.spawn(.{}, RunningJob.run, .{job});
@@ -459,6 +577,7 @@ const RootWidget = struct {
             _ = self.jobs.orderedRemove(index);
             try self.finishJob(job);
         }
+        self.clampSelectedJob();
     }
 
     fn finishJob(self: *RootWidget, job: *RunningJob) !void {
@@ -471,6 +590,7 @@ const RootWidget = struct {
 
         if (job.err_name) |err_name| {
             try self.state.log.push(.stderr, err_name, timestampMs(self.io));
+            self.markTaskFinished(job, .failed, null, 0);
             self.state.dispatch(.{ .set_status = "failed to start" });
             return;
         }
@@ -487,6 +607,16 @@ const RootWidget = struct {
             try std.fmt.allocPrint(self.allocator, "exit {d}", .{code})
         else
             "signal";
+        const state: TaskRunState = if (job.cancel_requested.load(.acquire))
+            .cancelled
+        else if (result.exitCode()) |code|
+            if (code == 0) .success else .failed
+        else
+            .signal;
+        self.markTaskFinished(job, state, result.exitCode(), result.elapsed_ms);
+        self.refreshHistory() catch {
+            try self.state.log.push(.stderr, "failed to reload history", timestampMs(self.io));
+        };
         self.state.dispatch(.{ .set_status = status });
         self.refreshGit();
     }
@@ -504,6 +634,78 @@ const RootWidget = struct {
         self.state.dispatch(.{ .set_status = "no running task" });
     }
 
+    fn requestCancelSelected(self: *RootWidget) void {
+        if (self.jobs.items.len == 0) {
+            self.state.dispatch(.{ .set_status = "no running task" });
+            return;
+        }
+        self.clampSelectedJob();
+        const job = self.jobs.items[self.selected_job_index];
+        if (job.done.load(.acquire)) {
+            self.state.dispatch(.{ .set_status = "job already done" });
+            return;
+        }
+        job.cancel_requested.store(true, .release);
+        self.state.dispatch(.{ .set_status = "cancel requested" });
+    }
+
+    fn markTaskFinished(
+        self: *RootWidget,
+        job: *RunningJob,
+        state: TaskRunState,
+        exit_code: ?u8,
+        elapsed_ms: u64,
+    ) void {
+        const index = job.task_index orelse return;
+        self.task_statuses[index] = .{
+            .state = state,
+            .exit_code = exit_code,
+            .elapsed_ms = elapsed_ms,
+            .job_id = job.id,
+        };
+    }
+
+    fn refreshHistory(self: *RootWidget) !void {
+        self.freeHistoryEntries();
+        self.history_entries = try history.loadRecent(self.allocator, self.io, self.state.project_root, 50);
+        self.clampSelectedHistory();
+        self.applyHistoryToTasks();
+    }
+
+    fn freeHistoryEntries(self: *RootWidget) void {
+        for (self.history_entries) |entry| history.freeEntry(self.allocator, entry);
+        if (self.history_entries.len > 0) self.allocator.free(self.history_entries);
+        self.history_entries = &.{};
+    }
+
+    fn applyHistoryToTasks(self: *RootWidget) void {
+        for (self.history_entries) |entry| {
+            const index = self.taskIndexById(entry.task_id) orelse continue;
+            if (self.task_statuses[index].state == .running) continue;
+            self.task_statuses[index] = .{
+                .state = if (entry.exit_code) |code| if (code == 0) .success else .failed else .signal,
+                .exit_code = entry.exit_code,
+                .elapsed_ms = entry.elapsed_ms,
+            };
+        }
+    }
+
+    fn clampSelectedJob(self: *RootWidget) void {
+        if (self.jobs.items.len == 0) {
+            self.selected_job_index = 0;
+            return;
+        }
+        self.selected_job_index = @min(self.selected_job_index, self.jobs.items.len - 1);
+    }
+
+    fn clampSelectedHistory(self: *RootWidget) void {
+        if (self.history_entries.len == 0) {
+            self.selected_history_index = 0;
+            return;
+        }
+        self.selected_history_index = @min(self.selected_history_index, self.history_entries.len - 1);
+    }
+
     fn drainJobEvents(self: *RootWidget) !void {
         for (self.jobs.items) |job| {
             try self.drainJobEvent(job, false);
@@ -514,6 +716,12 @@ const RootWidget = struct {
         job.mutex.lockUncancelable(self.io);
         defer job.mutex.unlock(self.io);
 
+        const prefix = if (job.events.items.len > 0 or flush)
+            try std.fmt.allocPrint(self.allocator, "[#{d} {s}] ", .{ job.id, job.task_spec.id })
+        else
+            "";
+        defer if (prefix.len > 0) self.allocator.free(prefix);
+
         for (job.events.items) |event| {
             const kind: log_buffer.LogKind = switch (event.kind) {
                 .stdout => .stdout,
@@ -523,14 +731,14 @@ const RootWidget = struct {
                 .stdout => &job.pending_stdout,
                 .stderr => &job.pending_stderr,
             };
-            try appendStreamBytes(&self.state.log, kind, pending, event.bytes, job.allocator, self.io);
+            try appendStreamBytes(&self.state.log, kind, pending, event.bytes, job.allocator, self.allocator, prefix, self.io);
             job.allocator.free(event.bytes);
         }
         job.events.clearRetainingCapacity();
 
         if (flush) {
-            try flushPendingLine(&self.state.log, .stdout, &job.pending_stdout, self.io);
-            try flushPendingLine(&self.state.log, .stderr, &job.pending_stderr, self.io);
+            try flushPendingLine(&self.state.log, .stdout, &job.pending_stdout, self.allocator, prefix, self.io);
+            try flushPendingLine(&self.state.log, .stderr, &job.pending_stderr, self.allocator, prefix, self.io);
         }
     }
 
@@ -599,6 +807,26 @@ const RootWidget = struct {
         };
     }
 
+    fn selectedHistoryTask(self: *RootWidget) ?task.TaskSpec {
+        if (self.history_entries.len == 0) return null;
+        self.clampSelectedHistory();
+        return self.taskById(self.history_entries[self.selected_history_index].task_id);
+    }
+
+    fn taskById(self: *RootWidget, task_id: []const u8) ?task.TaskSpec {
+        for (self.state.tasks) |item| {
+            if (std.mem.eql(u8, item.id, task_id)) return item;
+        }
+        return null;
+    }
+
+    fn taskIndexById(self: *RootWidget, task_id: []const u8) ?usize {
+        for (self.state.tasks, 0..) |item, index| {
+            if (std.mem.eql(u8, item.id, task_id)) return index;
+        }
+        return null;
+    }
+
     fn runningJobCount(self: *RootWidget) usize {
         var count: usize = 0;
         for (self.jobs.items) |job| {
@@ -621,14 +849,14 @@ const RootWidget = struct {
         });
 
         const panes = layout.compute(width, height);
-        self.drawTasks(surface, panes.tasks);
+        self.drawTasks(ctx.arena, surface, panes.tasks);
         self.drawOutput(surface, panes.output);
         self.drawStatus(ctx.arena, surface, panes.status);
 
         return surface;
     }
 
-    fn drawTasks(self: *RootWidget, surface: vxfw.Surface, rect: layout.Rect) void {
+    fn drawTasks(self: *RootWidget, arena: std.mem.Allocator, surface: vxfw.Surface, rect: layout.Rect) void {
         const title = if (self.state.focused_pane == .tasks) "Tasks *" else "Tasks";
         widgets.drawBox(surface, rect, title);
         if (rect.height <= 2 or rect.width <= 4) return;
@@ -643,8 +871,9 @@ const RootWidget = struct {
             const row: u16 = rect.y + 1 + @as(u16, @intCast(row_index));
             const marker = if (index == self.state.selected_task) ">" else " ";
             const style = selectedStyle(self.settings.theme, index == self.state.selected_task);
+            const line = formatTaskLine(arena, item, self.task_statuses[index]) catch item.label;
             widgets.writeTextStyled(surface, row, rect.x + 2, marker, style);
-            widgets.writeTextClippedStyled(surface, row, rect.x + 4, item.label, max_width, style);
+            widgets.writeTextClippedStyled(surface, row, rect.x + 4, line, max_width, style);
             row_index += 1;
         }
         if (row_index == 0) {
@@ -659,6 +888,14 @@ const RootWidget = struct {
         }
         if (self.state.mode == .help) {
             self.drawHelp(surface, rect);
+            return;
+        }
+        if (self.state.mode == .jobs) {
+            self.drawJobs(surface, rect);
+            return;
+        }
+        if (self.state.mode == .history) {
+            self.drawHistory(surface, rect);
             return;
         }
 
@@ -724,6 +961,8 @@ const RootWidget = struct {
             "/  search tasks; when output is focused, search output",
             "Tab  switch focus between task list and output",
             ":  command palette",
+            "J  show running jobs",
+            "h  show run history",
             "r  rerun last task",
             "x  cancel newest running task",
             "w  toggle file-watch rerun",
@@ -736,6 +975,64 @@ const RootWidget = struct {
         const max_rows: usize = rect.height - 2;
         for (lines[0..@min(lines.len, max_rows)], 0..) |line, index| {
             const row: u16 = rect.y + 1 + @as(u16, @intCast(index));
+            widgets.writeTextClipped(surface, row, rect.x + 2, line, rect.width - 4);
+        }
+    }
+
+    fn drawJobs(self: *RootWidget, surface: vxfw.Surface, rect: layout.Rect) void {
+        widgets.drawBox(surface, rect, "Jobs");
+        if (rect.height <= 2 or rect.width <= 4) return;
+        if (self.jobs.items.len == 0) {
+            widgets.writeTextClipped(surface, rect.y + 1, rect.x + 2, "No running jobs", rect.width - 4);
+            return;
+        }
+
+        const max_rows = rect.height - 2;
+        for (self.jobs.items[0..@min(self.jobs.items.len, max_rows)], 0..) |job, index| {
+            const row: u16 = rect.y + 1 + @as(u16, @intCast(index));
+            const marker = if (index == self.selected_job_index) ">" else " ";
+            const state = if (job.done.load(.acquire))
+                "done"
+            else if (job.cancel_requested.load(.acquire))
+                "cancelling"
+            else
+                "running";
+            const line = std.fmt.allocPrint(self.allocator, "{s} #{d} {s}  {s}", .{ marker, job.id, job.task_spec.id, state }) catch job.task_spec.id;
+            defer if (line.ptr != job.task_spec.id.ptr) self.allocator.free(line);
+            widgets.writeTextClipped(surface, row, rect.x + 2, line, rect.width - 4);
+        }
+    }
+
+    fn drawHistory(self: *RootWidget, surface: vxfw.Surface, rect: layout.Rect) void {
+        widgets.drawBox(surface, rect, "History");
+        if (rect.height <= 2 or rect.width <= 4) return;
+        if (self.history_entries.len == 0) {
+            widgets.writeTextClipped(surface, rect.y + 1, rect.x + 2, "No history yet", rect.width - 4);
+            return;
+        }
+
+        const max_rows = rect.height - 2;
+        self.clampSelectedHistory();
+        const first = if (self.selected_history_index >= max_rows)
+            self.selected_history_index - max_rows + 1
+        else
+            0;
+        for (self.history_entries[first..], 0..) |entry, offset| {
+            if (offset >= max_rows) break;
+            const index = first + offset;
+            const row: u16 = rect.y + 1 + @as(u16, @intCast(offset));
+            const marker = if (index == self.selected_history_index) ">" else " ";
+            const exit_text = if (entry.exit_code) |code|
+                std.fmt.allocPrint(self.allocator, "exit {d}", .{code}) catch "exit"
+            else
+                "signal";
+            defer if (entry.exit_code != null) self.allocator.free(exit_text);
+            const line = std.fmt.allocPrint(
+                self.allocator,
+                "{s} {s}  {s}  {d}ms",
+                .{ marker, entry.task_id, exit_text, entry.elapsed_ms },
+            ) catch entry.task_id;
+            defer if (line.ptr != entry.task_id.ptr) self.allocator.free(line);
             widgets.writeTextClipped(surface, row, rect.x + 2, line, rect.width - 4);
         }
     }
@@ -761,6 +1058,10 @@ const RootWidget = struct {
             "palette: Enter run command  Esc close"
         else if (self.state.mode == .help)
             "help: Esc close"
+        else if (self.state.mode == .jobs)
+            "jobs: j/k select  x cancel  Esc close"
+        else if (self.state.mode == .history)
+            "history: j/k select  Enter rerun  Esc close"
         else if (running_count > 0)
             std.fmt.allocPrint(arena, "running: {d}  {s}", .{ running_count, git_line }) catch "running"
         else if (self.watch_enabled)
@@ -770,9 +1071,25 @@ const RootWidget = struct {
         const status_line = std.fmt.allocPrint(arena, "{s}  status: {s}", .{ mode_line, status }) catch mode_line;
         widgets.writeTextClippedStyled(surface, rect.y + 1, rect.x + 2, status_line, rect.width - 4, statusStyle(self.settings.theme));
         if (rect.height > 2) {
-            widgets.writeTextClipped(surface, rect.y + 2, rect.x + 2, "Enter run / find : cmds Tab pane ? help w watch t trees r rerun x stop c clear g git q quit", rect.width - 4);
+            widgets.writeTextClipped(surface, rect.y + 2, rect.x + 2, "Enter run / find : cmds J jobs h history Tab pane ? help w watch t trees r rerun x stop c clear g git q quit", rect.width - 4);
         }
     }
+};
+
+const TaskRunState = enum {
+    idle,
+    running,
+    success,
+    failed,
+    cancelled,
+    signal,
+};
+
+const TaskStatus = struct {
+    state: TaskRunState = .idle,
+    exit_code: ?u8 = null,
+    elapsed_ms: u64 = 0,
+    job_id: ?usize = null,
 };
 
 const PaletteCommandId = enum {
@@ -782,6 +1099,8 @@ const PaletteCommandId = enum {
     refresh_git,
     show_worktrees,
     toggle_watch,
+    show_jobs,
+    show_history,
     search_tasks,
     quit,
 };
@@ -798,6 +1117,8 @@ const palette_commands = [_]PaletteCommand{
     .{ .id = .refresh_git, .label = "Refresh Git status" },
     .{ .id = .show_worktrees, .label = "Show Git worktrees" },
     .{ .id = .toggle_watch, .label = "Toggle file watch" },
+    .{ .id = .show_jobs, .label = "Show running jobs" },
+    .{ .id = .show_history, .label = "Show run history" },
     .{ .id = .search_tasks, .label = "Search tasks" },
     .{ .id = .quit, .label = "Quit" },
 };
@@ -808,6 +1129,7 @@ const RunningJob = struct {
     io: std.Io,
     env_map: *std.process.Environ.Map,
     task_spec: task.TaskSpec,
+    task_index: ?usize = null,
     thread: std.Thread = undefined,
     done: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
     cancel_requested: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
@@ -871,6 +1193,31 @@ fn onStreamOutput(context: *anyopaque, kind: runner.StreamKind, bytes: []const u
     try job.pushEvent(kind, bytes);
 }
 
+fn formatTaskLine(allocator: std.mem.Allocator, item: task.TaskSpec, status: TaskStatus) ![]const u8 {
+    return std.fmt.allocPrint(
+        allocator,
+        "{s:<22} {s:<7} {s}",
+        .{ item.label, item.source.label(), taskStatusLabel(allocator, status) catch "" },
+    );
+}
+
+fn taskStatusLabel(allocator: std.mem.Allocator, status: TaskStatus) ![]const u8 {
+    return switch (status.state) {
+        .idle => "",
+        .running => if (status.job_id) |id|
+            std.fmt.allocPrint(allocator, "running #{d}", .{id})
+        else
+            "running",
+        .success => std.fmt.allocPrint(allocator, "ok {d}ms", .{status.elapsed_ms}),
+        .failed => if (status.exit_code) |code|
+            std.fmt.allocPrint(allocator, "failed {d}", .{code})
+        else
+            "failed",
+        .cancelled => "cancelled",
+        .signal => "signal",
+    };
+}
+
 fn formatCommand(allocator: std.mem.Allocator, argv: []const []const u8) ![]const u8 {
     var command: std.ArrayList(u8) = .empty;
     errdefer command.deinit(allocator);
@@ -889,7 +1236,9 @@ fn appendStreamBytes(
     kind: log_buffer.LogKind,
     pending: *std.ArrayList(u8),
     bytes: []const u8,
-    allocator: std.mem.Allocator,
+    pending_allocator: std.mem.Allocator,
+    log_allocator: std.mem.Allocator,
+    prefix: []const u8,
     io: std.Io,
 ) !void {
     if (bytes.len == 0) return;
@@ -897,21 +1246,31 @@ fn appendStreamBytes(
     var start: usize = 0;
     for (bytes, 0..) |byte, index| {
         if (byte != '\n') continue;
-        try pending.appendSlice(allocator, bytes[start..index]);
-        try flushPendingLine(log, kind, pending, io);
+        try pending.appendSlice(pending_allocator, bytes[start..index]);
+        try flushPendingLine(log, kind, pending, log_allocator, prefix, io);
         start = index + 1;
     }
-    if (start < bytes.len) try pending.appendSlice(allocator, bytes[start..]);
+    if (start < bytes.len) try pending.appendSlice(pending_allocator, bytes[start..]);
 }
 
 fn flushPendingLine(
     log: *log_buffer.LogBuffer,
     kind: log_buffer.LogKind,
     pending: *std.ArrayList(u8),
+    allocator: std.mem.Allocator,
+    prefix: []const u8,
     io: std.Io,
 ) !void {
     const line = std.mem.trim(u8, pending.items, "\r");
-    if (line.len > 0) try log.push(kind, line, timestampMs(io));
+    if (line.len > 0) {
+        if (prefix.len == 0) {
+            try log.push(kind, line, timestampMs(io));
+        } else {
+            const prefixed = try std.fmt.allocPrint(allocator, "{s}{s}", .{ prefix, line });
+            defer allocator.free(prefixed);
+            try log.push(kind, prefixed, timestampMs(io));
+        }
+    }
     pending.clearRetainingCapacity();
 }
 
@@ -989,14 +1348,32 @@ test "stream log chunks keep partial lines together" {
     var pending: std.ArrayList(u8) = .empty;
     defer pending.deinit(std.testing.allocator);
 
-    try appendStreamBytes(&log, .stdout, &pending, "hel", std.testing.allocator, std.testing.io);
+    try appendStreamBytes(
+        &log,
+        .stdout,
+        &pending,
+        "hel",
+        std.testing.allocator,
+        std.testing.allocator,
+        "",
+        std.testing.io,
+    );
     try std.testing.expectEqual(@as(usize, 0), log.items().len);
 
-    try appendStreamBytes(&log, .stdout, &pending, "lo\nnext", std.testing.allocator, std.testing.io);
+    try appendStreamBytes(
+        &log,
+        .stdout,
+        &pending,
+        "lo\nnext",
+        std.testing.allocator,
+        std.testing.allocator,
+        "",
+        std.testing.io,
+    );
     try std.testing.expectEqual(@as(usize, 1), log.items().len);
     try std.testing.expectEqualStrings("hello", log.items()[0].text);
 
-    try flushPendingLine(&log, .stdout, &pending, std.testing.io);
+    try flushPendingLine(&log, .stdout, &pending, std.testing.allocator, "", std.testing.io);
     try std.testing.expectEqual(@as(usize, 2), log.items().len);
     try std.testing.expectEqualStrings("next", log.items()[1].text);
 }
