@@ -38,6 +38,7 @@ pub fn run(
         .git_enabled = git_enabled,
         .state = &state,
     };
+    defer root.deinit();
 
     try app.run(root.widget(), .{});
 }
@@ -48,8 +49,18 @@ const RootWidget = struct {
     env_map: *std.process.Environ.Map,
     git_enabled: bool,
     state: *app_state.AppState,
-    running: ?*RunningJob = null,
+    jobs: std.ArrayList(*RunningJob) = .empty,
+    next_job_id: usize = 1,
     palette_index: usize = 0,
+
+    fn deinit(self: *RootWidget) void {
+        for (self.jobs.items) |job| {
+            if (!job.done.load(.acquire)) job.cancel_requested.store(true, .release);
+            job.thread.join();
+            self.allocator.destroy(job);
+        }
+        self.jobs.deinit(self.allocator);
+    }
 
     fn widget(self: *RootWidget) vxfw.Widget {
         return .{
@@ -70,14 +81,11 @@ const RootWidget = struct {
                 if (self.handleSearchKey(ctx, key)) return;
                 if (try self.handlePaletteKey(ctx, key)) return;
                 if (key.matches('q', .{}) or key.matches('c', .{ .ctrl = true })) {
-                    if (self.running) |job| {
-                        if (!job.done.load(.acquire)) {
-                            self.state.dispatch(.{ .set_status = "task running" });
-                            ctx.consumeAndRedraw();
-                            return;
-                        }
-                        try self.finishJob(job);
-                        self.running = null;
+                    try self.finishCompletedJobs();
+                    if (self.runningJobCount() > 0) {
+                        self.state.dispatch(.{ .set_status = "task running" });
+                        ctx.consumeAndRedraw();
+                        return;
                     }
                     ctx.quit = true;
                     ctx.consume_event = true;
@@ -230,13 +238,10 @@ const RootWidget = struct {
                 self.state.dispatch(.{ .set_status = "search" });
             },
             .quit => {
-                if (self.running) |job| {
-                    if (!job.done.load(.acquire)) {
-                        self.state.dispatch(.{ .set_status = "task running" });
-                        return;
-                    }
-                    try self.finishJob(job);
-                    self.running = null;
+                try self.finishCompletedJobs();
+                if (self.runningJobCount() > 0) {
+                    self.state.dispatch(.{ .set_status = "task running" });
+                    return;
                 }
                 ctx.quit = true;
             },
@@ -244,43 +249,48 @@ const RootWidget = struct {
     }
 
     fn startTask(self: *RootWidget, ctx: *vxfw.EventContext, selected: task.TaskSpec) !void {
-        if (self.running) |job| {
-            if (!job.done.load(.acquire)) {
-                self.state.dispatch(.{ .set_status = "task already running" });
-                return;
-            }
-            try self.finishJob(job);
-            self.running = null;
-        }
+        try self.finishCompletedJobs();
 
         self.state.dispatch(.{ .set_last_task = selected.id });
         self.state.dispatch(.{ .set_status = "running" });
 
         const command_line = try formatCommand(self.allocator, selected.argv);
+        defer self.allocator.free(command_line);
         try self.state.log.push(.system, command_line, timestampMs(self.io));
 
         const job = try self.allocator.create(RunningJob);
         job.* = .{
+            .id = self.next_job_id,
             .allocator = self.allocator,
             .io = self.io,
             .env_map = self.env_map,
             .task_spec = selected,
         };
+        self.next_job_id += 1;
         job.thread = try std.Thread.spawn(.{}, RunningJob.run, .{job});
-        self.running = job;
+        try self.jobs.append(self.allocator, job);
         try ctx.tick(100, self.widget());
     }
 
     fn pollRunning(self: *RootWidget, ctx: *vxfw.EventContext) !void {
-        const job = self.running orelse return;
-        if (!job.done.load(.acquire)) {
+        try self.finishCompletedJobs();
+        if (self.runningJobCount() > 0) {
             try ctx.tick(100, self.widget());
-            return;
         }
-
-        try self.finishJob(job);
-        self.running = null;
         ctx.redraw = true;
+    }
+
+    fn finishCompletedJobs(self: *RootWidget) !void {
+        var index: usize = 0;
+        while (index < self.jobs.items.len) {
+            const job = self.jobs.items[index];
+            if (!job.done.load(.acquire)) {
+                index += 1;
+                continue;
+            }
+            _ = self.jobs.orderedRemove(index);
+            try self.finishJob(job);
+        }
     }
 
     fn finishJob(self: *RootWidget, job: *RunningJob) !void {
@@ -312,16 +322,16 @@ const RootWidget = struct {
     }
 
     fn requestCancel(self: *RootWidget) void {
-        const job = self.running orelse {
-            self.state.dispatch(.{ .set_status = "no running task" });
-            return;
-        };
-        if (job.done.load(.acquire)) {
-            self.state.dispatch(.{ .set_status = "task finished" });
+        var index = self.jobs.items.len;
+        while (index > 0) {
+            index -= 1;
+            const job = self.jobs.items[index];
+            if (job.done.load(.acquire)) continue;
+            job.cancel_requested.store(true, .release);
+            self.state.dispatch(.{ .set_status = "cancel requested" });
             return;
         }
-        job.cancel_requested.store(true, .release);
-        self.state.dispatch(.{ .set_status = "cancel requested" });
+        self.state.dispatch(.{ .set_status = "no running task" });
     }
 
     fn appendFailureSummary(self: *RootWidget, result: runner.RunResult) !void {
@@ -354,6 +364,14 @@ const RootWidget = struct {
             if (std.mem.eql(u8, item.id, task_id)) return item;
         }
         return null;
+    }
+
+    fn runningJobCount(self: *RootWidget) usize {
+        var count: usize = 0;
+        for (self.jobs.items) |job| {
+            if (!job.done.load(.acquire)) count += 1;
+        }
+        return count;
     }
 
     fn drawErased(ptr: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.Surface {
@@ -440,15 +458,19 @@ const RootWidget = struct {
         if (rect.height == 0 or rect.width <= 4) return;
 
         const status = if (self.state.status_message.len > 0) self.state.status_message else "ready";
-        var line_buffer: [512]u8 = undefined;
-        const git_line = formatGitLine(&line_buffer, self.git_enabled, self.state.git_summary);
+        var git_buffer: [512]u8 = undefined;
+        var mode_buffer: [512]u8 = undefined;
+        const git_line = formatGitLine(&git_buffer, self.git_enabled, self.state.git_summary);
+        const running_count = self.runningJobCount();
         const mode_line = if (self.state.mode == .search)
-            std.fmt.bufPrint(&line_buffer, "search: {s}  matches: {d}", .{
+            std.fmt.bufPrint(&mode_buffer, "search: {s}  matches: {d}", .{
                 self.state.search_query.items,
                 self.state.visibleTaskCount(),
             }) catch "search"
         else if (self.state.mode == .palette)
             "palette: Enter run command  Esc close"
+        else if (running_count > 0)
+            std.fmt.bufPrint(&mode_buffer, "running: {d}  {s}", .{ running_count, git_line }) catch "running"
         else
             git_line;
         widgets.writeTextClipped(surface, rect.y + 1, rect.x + 2, mode_line, rect.width - 4);
@@ -483,6 +505,7 @@ const palette_commands = [_]PaletteCommand{
 };
 
 const RunningJob = struct {
+    id: usize,
     allocator: std.mem.Allocator,
     io: std.Io,
     env_map: *std.process.Environ.Map,
