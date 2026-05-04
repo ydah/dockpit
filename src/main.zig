@@ -31,6 +31,7 @@ pub fn main(init: std.process.Init) !void {
             std.process.exit(1);
         };
         const result = try dockpit.runner.runTask(arena, init.io, item, init.environ_map);
+        dockpit.history.appendRun(arena, init.io, project_root, item, result) catch {};
         try printRunResult(init.io, item, result);
         if (result.exitCode()) |code| {
             std.process.exit(code);

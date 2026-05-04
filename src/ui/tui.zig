@@ -4,6 +4,7 @@ const vxfw = vaxis.vxfw;
 
 const app_state = @import("../core/app_state.zig");
 const git = @import("../core/git.zig");
+const history = @import("../core/history.zig");
 const log_buffer = @import("../core/log_buffer.zig");
 const runner = @import("../core/runner.zig");
 const task = @import("../core/task.zig");
@@ -25,6 +26,9 @@ pub fn run(
 
     var state = app_state.AppState.init(allocator, project_root, tasks, git_summary);
     defer state.deinit();
+    if (history.loadLatestTaskId(allocator, io, project_root) catch null) |task_id| {
+        state.dispatch(.{ .set_last_task = task_id });
+    }
 
     var root = RootWidget{
         .allocator = allocator,
@@ -171,6 +175,9 @@ const RootWidget = struct {
         }
 
         const result = job.result orelse return;
+        history.appendRun(self.allocator, self.io, self.state.project_root, job.task_spec, result) catch {
+            try self.state.log.push(.stderr, "failed to write history", timestampMs(self.io));
+        };
         try appendOutputLines(&self.state.log, .stdout, result.stdout, self.io);
         try appendOutputLines(&self.state.log, .stderr, result.stderr, self.io);
 

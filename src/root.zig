@@ -7,6 +7,7 @@ pub const config = @import("core/config.zig");
 pub const detect = @import("core/detect.zig");
 pub const runner = @import("core/runner.zig");
 pub const git = @import("core/git.zig");
+pub const history = @import("core/history.zig");
 pub const app_state = @import("core/app_state.zig");
 pub const tui = @import("ui/tui.zig");
 
@@ -20,6 +21,7 @@ test {
     _ = detect;
     _ = runner;
     _ = git;
+    _ = history;
     _ = app_state;
     _ = tui;
 }
