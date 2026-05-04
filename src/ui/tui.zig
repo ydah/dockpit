@@ -49,6 +49,7 @@ const RootWidget = struct {
     git_enabled: bool,
     state: *app_state.AppState,
     running: ?*RunningJob = null,
+    palette_index: usize = 0,
 
     fn widget(self: *RootWidget) vxfw.Widget {
         return .{
@@ -67,6 +68,7 @@ const RootWidget = struct {
         switch (event) {
             .key_press => |key| {
                 if (self.handleSearchKey(ctx, key)) return;
+                if (try self.handlePaletteKey(ctx, key)) return;
                 if (key.matches('q', .{}) or key.matches('c', .{ .ctrl = true })) {
                     if (self.running) |job| {
                         if (!job.done.load(.acquire)) {
@@ -125,6 +127,14 @@ const RootWidget = struct {
                     self.state.dispatch(.enter_search);
                     self.state.dispatch(.{ .set_status = "search" });
                     ctx.consumeAndRedraw();
+                    return;
+                }
+                if (key.matches(':', .{})) {
+                    self.state.dispatch(.exit_mode);
+                    self.state.mode = .palette;
+                    self.palette_index = 0;
+                    self.state.dispatch(.{ .set_status = "palette" });
+                    ctx.consumeAndRedraw();
                 }
             },
             .tick => try self.pollRunning(ctx),
@@ -175,6 +185,62 @@ const RootWidget = struct {
         }
 
         return false;
+    }
+
+    fn handlePaletteKey(self: *RootWidget, ctx: *vxfw.EventContext, key: vaxis.Key) !bool {
+        if (self.state.mode != .palette) return false;
+
+        if (key.matches(vaxis.Key.escape, .{}) or key.matches('c', .{ .ctrl = true })) {
+            self.state.dispatch(.exit_mode);
+            self.state.dispatch(.{ .set_status = "ready" });
+            ctx.consumeAndRedraw();
+            return true;
+        }
+        if (key.matches('j', .{}) or key.matches(vaxis.Key.down, .{})) {
+            self.palette_index = (self.palette_index + 1) % palette_commands.len;
+            ctx.consumeAndRedraw();
+            return true;
+        }
+        if (key.matches('k', .{}) or key.matches(vaxis.Key.up, .{})) {
+            self.palette_index = if (self.palette_index == 0) palette_commands.len - 1 else self.palette_index - 1;
+            ctx.consumeAndRedraw();
+            return true;
+        }
+        if (key.matches(vaxis.Key.enter, .{})) {
+            try self.executePaletteCommand(ctx, palette_commands[self.palette_index].id);
+            if (self.state.mode == .palette) self.state.dispatch(.exit_mode);
+            ctx.consumeAndRedraw();
+            return true;
+        }
+
+        return true;
+    }
+
+    fn executePaletteCommand(self: *RootWidget, ctx: *vxfw.EventContext, id: PaletteCommandId) !void {
+        switch (id) {
+            .run_selected => if (self.state.selectedTask()) |selected| try self.startTask(ctx, selected),
+            .rerun_last => if (self.lastTask()) |last| try self.startTask(ctx, last),
+            .clear_output => {
+                self.state.dispatch(.clear_log);
+                self.state.dispatch(.{ .set_status = "log cleared" });
+            },
+            .refresh_git => self.refreshGit(),
+            .search_tasks => {
+                self.state.dispatch(.enter_search);
+                self.state.dispatch(.{ .set_status = "search" });
+            },
+            .quit => {
+                if (self.running) |job| {
+                    if (!job.done.load(.acquire)) {
+                        self.state.dispatch(.{ .set_status = "task running" });
+                        return;
+                    }
+                    try self.finishJob(job);
+                    self.running = null;
+                }
+                ctx.quit = true;
+            },
+        }
     }
 
     fn startTask(self: *RootWidget, ctx: *vxfw.EventContext, selected: task.TaskSpec) !void {
@@ -334,6 +400,11 @@ const RootWidget = struct {
     }
 
     fn drawOutput(self: *RootWidget, surface: vxfw.Surface, rect: layout.Rect) void {
+        if (self.state.mode == .palette) {
+            self.drawPalette(surface, rect);
+            return;
+        }
+
         widgets.drawBox(surface, rect, "Output");
         if (rect.height <= 2 or rect.width <= 4) return;
 
@@ -351,6 +422,19 @@ const RootWidget = struct {
         }
     }
 
+    fn drawPalette(self: *RootWidget, surface: vxfw.Surface, rect: layout.Rect) void {
+        widgets.drawBox(surface, rect, "Command Palette");
+        if (rect.height <= 2 or rect.width <= 4) return;
+
+        const max_rows = rect.height - 2;
+        for (palette_commands[0..@min(palette_commands.len, max_rows)], 0..) |command, index| {
+            const row: u16 = rect.y + 1 + @as(u16, @intCast(index));
+            const marker = if (index == self.palette_index) ">" else " ";
+            widgets.writeText(surface, row, rect.x + 2, marker);
+            widgets.writeTextClipped(surface, row, rect.x + 4, command.label, rect.width - 4);
+        }
+    }
+
     fn drawStatus(self: *RootWidget, surface: vxfw.Surface, rect: layout.Rect) void {
         widgets.drawBox(surface, rect, "Status");
         if (rect.height == 0 or rect.width <= 4) return;
@@ -363,14 +447,39 @@ const RootWidget = struct {
                 self.state.search_query.items,
                 self.state.visibleTaskCount(),
             }) catch "search"
+        else if (self.state.mode == .palette)
+            "palette: Enter run command  Esc close"
         else
             git_line;
         widgets.writeTextClipped(surface, rect.y + 1, rect.x + 2, mode_line, rect.width - 4);
         if (rect.height > 2) {
-            widgets.writeTextClipped(surface, rect.y + 2, rect.x + 2, "Enter run  / search  r rerun  x cancel  c clear  g git  j/k move  q quit", rect.width - 4);
+            widgets.writeTextClipped(surface, rect.y + 2, rect.x + 2, "Enter run  / search  : palette  r rerun  x cancel  c clear  g git  q quit", rect.width - 4);
             widgets.writeTextClipped(surface, rect.y + 2, rect.x + 68, status, rect.width - 4);
         }
     }
+};
+
+const PaletteCommandId = enum {
+    run_selected,
+    rerun_last,
+    clear_output,
+    refresh_git,
+    search_tasks,
+    quit,
+};
+
+const PaletteCommand = struct {
+    id: PaletteCommandId,
+    label: []const u8,
+};
+
+const palette_commands = [_]PaletteCommand{
+    .{ .id = .run_selected, .label = "Run selected task" },
+    .{ .id = .rerun_last, .label = "Rerun last task" },
+    .{ .id = .clear_output, .label = "Clear output" },
+    .{ .id = .refresh_git, .label = "Refresh Git status" },
+    .{ .id = .search_tasks, .label = "Search tasks" },
+    .{ .id = .quit, .label = "Quit" },
 };
 
 const RunningJob = struct {
