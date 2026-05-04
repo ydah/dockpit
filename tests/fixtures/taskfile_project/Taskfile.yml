@@ -1,0 +1,9 @@
+version: "3"
+
+tasks:
+  build:
+    cmds:
+      - zig build
+  test:
+    cmds:
+      - zig build test

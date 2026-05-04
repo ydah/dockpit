@@ -6,8 +6,17 @@ pub const TaskSource = enum {
     make,
     just,
     npm,
+    pnpm,
+    yarn,
+    bun,
+    deno,
     cargo,
     go,
+    python,
+    ruby,
+    nix,
+    mise,
+    taskfile,
     docker,
 
     pub fn label(source: TaskSource) []const u8 {
@@ -17,8 +26,17 @@ pub const TaskSource = enum {
             .make => "make",
             .just => "just",
             .npm => "npm",
+            .pnpm => "pnpm",
+            .yarn => "yarn",
+            .bun => "bun",
+            .deno => "deno",
             .cargo => "cargo",
             .go => "go",
+            .python => "python",
+            .ruby => "ruby",
+            .nix => "nix",
+            .mise => "mise",
+            .taskfile => "taskfile",
             .docker => "docker",
         };
     }
@@ -55,6 +73,7 @@ pub const TaskSpec = struct {
 test "task source labels are stable" {
     try std.testing.expectEqualStrings("config", TaskSource.config.label());
     try std.testing.expectEqualStrings("zig", TaskSource.zig.label());
+    try std.testing.expectEqualStrings("pnpm", TaskSource.pnpm.label());
     try std.testing.expectEqualStrings("docker", TaskSource.docker.label());
 }
 

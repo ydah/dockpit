@@ -46,6 +46,12 @@ Disable Git status discovery:
 zig build run -- --no-git
 ```
 
+Treat invalid configuration as an error instead of falling back to auto detection:
+
+```sh
+zig build run -- --strict-config --print-tasks
+```
+
 ## Key Bindings
 
 | Key | Action |
@@ -61,6 +67,8 @@ zig build run -- --no-git
 | `c` | Clear output |
 | `g` | Refresh Git status |
 | `t` | Show Git worktrees |
+| `J` | Show running jobs |
+| `h` | Show run history |
 | `w` | Toggle file-watch rerun |
 | `Tab` | Switch focus between tasks and output |
 | `?` | Show help |
@@ -82,6 +90,10 @@ Create `.dockpit.json` in the project root:
       "label": "dev server",
       "cmd": ["npm", "run", "dev"],
       "cwd": ".",
+      "description": "Start the development server",
+      "group": "serve",
+      "default": true,
+      "watch": false,
       "env": {
         "NODE_ENV": "development"
       }
@@ -95,9 +107,9 @@ Create `.dockpit.json` in the project root:
 }
 ```
 
-`cmd` must be an argv array. `dockpit` does not run user-configured commands through a shell.
+`cmd` must be an argv array. `dockpit` does not run user-configured commands through a shell. Task metadata fields are optional: `description`, `group`, `default`, and `watch`.
 
-Supported themes are `default`, `dark`, `light`, and `high-contrast`. Keybinding names include `run`, `rerun`, `cancel`, `clear`, `git`, `worktrees`, `watch`, `search`, `palette`, `focus`, `help`, and `quit`.
+Supported themes are `default`, `dark`, `light`, and `high-contrast`. Keybinding names include `run`, `rerun`, `cancel`, `clear`, `git`, `worktrees`, `jobs`, `history`, `watch`, `search`, `palette`, `focus`, `help`, and `quit`.
 
 ## Auto Detection
 
@@ -109,9 +121,15 @@ Supported themes are `default`, `dark`, `light`, and `high-contrast`. Keybinding
 | `build.zig` | `zig build`, `zig build test`, and simple `b.step("name", ...)` build steps |
 | `Makefile` / `makefile` | `.PHONY` targets or simple targets |
 | `justfile` / `Justfile` | simple recipes without arguments |
-| `package.json` | `npm run <script>` |
+| `package.json` | package scripts via `npm`, `pnpm`, `yarn`, or `bun`, inferred from `packageManager` or lockfiles |
+| `deno.json` / `deno.jsonc` | `deno task <name>` |
 | `Cargo.toml` | `cargo build`, `cargo test`, `cargo run` |
 | `go.mod` | `go test ./...`, `go build ./...`, `go run .` |
+| `pyproject.toml` / `requirements.txt` / `setup.py` | `python -m pytest` |
+| `Gemfile` | `bundle exec rake test`, `bundle exec rspec` |
+| `flake.nix` | `nix flake check`, `nix build`, `nix develop` |
+| `Taskfile.yml` / `Taskfile.yaml` | `task <name>` |
+| `mise.toml` / `.mise.toml` | `mise run <name>` |
 | `compose.yaml` / `compose.yml` / `docker-compose.yml` / `docker-compose.yaml` | Docker Compose up/down/ps/logs |
 
 ## Runtime Notes

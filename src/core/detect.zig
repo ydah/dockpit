@@ -53,8 +53,14 @@ fn detectAutoTasks(
     try detectMakeTasks(allocator, io, project_root, tasks);
     try detectJustTasks(allocator, io, project_root, tasks);
     try detectNpmTasks(allocator, io, project_root, tasks);
+    try detectDenoTasks(allocator, io, project_root, tasks);
     try detectCargoTasks(allocator, io, project_root, tasks);
     try detectGoTasks(allocator, io, project_root, tasks);
+    try detectPythonTasks(allocator, io, project_root, tasks);
+    try detectRubyTasks(allocator, io, project_root, tasks);
+    try detectNixTasks(allocator, io, project_root, tasks);
+    try detectTaskfileTasks(allocator, io, project_root, tasks);
+    try detectMiseTasks(allocator, io, project_root, tasks);
     try detectDockerComposeTasks(allocator, io, project_root, tasks);
 
     return tasks.toOwnedSlice(allocator);
@@ -192,23 +198,108 @@ fn detectNpmTasks(
     const scripts = root.object.get("scripts") orelse return;
     if (scripts != .object) return;
 
+    const manager = try detectPackageManager(allocator, io, project_root, root);
     var iterator = scripts.object.iterator();
     while (iterator.next()) |entry| {
         if (entry.value_ptr.* != .string) continue;
 
         const name = entry.key_ptr.*;
-        const id = try prefixedId(allocator, "npm", name);
+        const id = try prefixedId(allocator, manager.name, name);
         defer allocator.free(id);
-        const label = try std.fmt.allocPrint(allocator, "npm run {s}", .{name});
+        const label = try std.fmt.allocPrint(allocator, "{s} run {s}", .{ manager.name, name });
+        defer allocator.free(label);
+
+        if (manager.source == .yarn) {
+            try appendUniqueTask(allocator, tasks, try makeTask(
+                allocator,
+                id,
+                label,
+                &.{ "yarn", "run", name },
+                project_root,
+                manager.source,
+            ));
+        } else {
+            try appendUniqueTask(allocator, tasks, try makeTask(
+                allocator,
+                id,
+                label,
+                &.{ manager.name, "run", name },
+                project_root,
+                manager.source,
+            ));
+        }
+    }
+}
+
+const PackageManager = struct {
+    name: []const u8,
+    source: task.TaskSource,
+};
+
+fn detectPackageManager(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    project_root: []const u8,
+    package_json: std.json.Value,
+) !PackageManager {
+    if (package_json == .object) {
+        if (package_json.object.get("packageManager")) |value| {
+            if (value == .string) {
+                if (matchesPackageManager(value.string, "pnpm")) return .{ .name = "pnpm", .source = .pnpm };
+                if (matchesPackageManager(value.string, "yarn")) return .{ .name = "yarn", .source = .yarn };
+                if (matchesPackageManager(value.string, "bun")) return .{ .name = "bun", .source = .bun };
+                if (matchesPackageManager(value.string, "npm")) return .{ .name = "npm", .source = .npm };
+            }
+        }
+    }
+
+    if (try hasFile(allocator, io, project_root, "pnpm-lock.yaml")) return .{ .name = "pnpm", .source = .pnpm };
+    if (try hasFile(allocator, io, project_root, "yarn.lock")) return .{ .name = "yarn", .source = .yarn };
+    if (try hasAnyFile(allocator, io, project_root, &.{ "bun.lock", "bun.lockb" })) return .{ .name = "bun", .source = .bun };
+    return .{ .name = "npm", .source = .npm };
+}
+
+fn matchesPackageManager(value: []const u8, name: []const u8) bool {
+    if (std.mem.eql(u8, value, name)) return true;
+    return value.len > name.len and
+        std.mem.startsWith(u8, value, name) and
+        value[name.len] == '@';
+}
+
+fn detectDenoTasks(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    project_root: []const u8,
+    tasks: *std.ArrayList(task.TaskSpec),
+) !void {
+    const contents = try readFirstProjectFile(allocator, io, project_root, &.{ "deno.json", "deno.jsonc" }) orelse return;
+    defer allocator.free(contents);
+
+    var parsed = try std.json.parseFromSlice(std.json.Value, allocator, contents, .{});
+    defer parsed.deinit();
+
+    const root = parsed.value;
+    if (root != .object) return;
+    const deno_tasks = root.object.get("tasks") orelse return;
+    if (deno_tasks != .object) return;
+
+    var iterator = deno_tasks.object.iterator();
+    while (iterator.next()) |entry| {
+        if (entry.value_ptr.* != .string and entry.value_ptr.* != .object) continue;
+
+        const name = entry.key_ptr.*;
+        const id = try prefixedId(allocator, "deno", name);
+        defer allocator.free(id);
+        const label = try std.fmt.allocPrint(allocator, "deno task {s}", .{name});
         defer allocator.free(label);
 
         try appendUniqueTask(allocator, tasks, try makeTask(
             allocator,
             id,
             label,
-            &.{ "npm", "run", name },
+            &.{ "deno", "task", name },
             project_root,
-            .npm,
+            .deno,
         ));
     }
 }
@@ -279,6 +370,146 @@ fn detectGoTasks(
         project_root,
         .go,
     ));
+}
+
+fn detectPythonTasks(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    project_root: []const u8,
+    tasks: *std.ArrayList(task.TaskSpec),
+) !void {
+    if (!try hasAnyFile(allocator, io, project_root, &.{ "pyproject.toml", "requirements.txt", "setup.py" })) return;
+
+    try appendUniqueTask(allocator, tasks, try makeTask(
+        allocator,
+        "python-test",
+        "python -m pytest",
+        &.{ "python", "-m", "pytest" },
+        project_root,
+        .python,
+    ));
+}
+
+fn detectRubyTasks(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    project_root: []const u8,
+    tasks: *std.ArrayList(task.TaskSpec),
+) !void {
+    if (!try hasFile(allocator, io, project_root, "Gemfile")) return;
+
+    try appendUniqueTask(allocator, tasks, try makeTask(
+        allocator,
+        "ruby-test",
+        "bundle exec rake test",
+        &.{ "bundle", "exec", "rake", "test" },
+        project_root,
+        .ruby,
+    ));
+    try appendUniqueTask(allocator, tasks, try makeTask(
+        allocator,
+        "ruby-rspec",
+        "bundle exec rspec",
+        &.{ "bundle", "exec", "rspec" },
+        project_root,
+        .ruby,
+    ));
+}
+
+fn detectNixTasks(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    project_root: []const u8,
+    tasks: *std.ArrayList(task.TaskSpec),
+) !void {
+    if (!try hasFile(allocator, io, project_root, "flake.nix")) return;
+
+    try appendUniqueTask(allocator, tasks, try makeTask(
+        allocator,
+        "nix-check",
+        "nix flake check",
+        &.{ "nix", "flake", "check" },
+        project_root,
+        .nix,
+    ));
+    try appendUniqueTask(allocator, tasks, try makeTask(
+        allocator,
+        "nix-build",
+        "nix build",
+        &.{ "nix", "build" },
+        project_root,
+        .nix,
+    ));
+    try appendUniqueTask(allocator, tasks, try makeTask(
+        allocator,
+        "nix-develop",
+        "nix develop",
+        &.{ "nix", "develop" },
+        project_root,
+        .nix,
+    ));
+}
+
+fn detectTaskfileTasks(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    project_root: []const u8,
+    tasks: *std.ArrayList(task.TaskSpec),
+) !void {
+    const contents = try readFirstProjectFile(allocator, io, project_root, &.{ "Taskfile.yml", "Taskfile.yaml" }) orelse return;
+    defer allocator.free(contents);
+
+    var names: std.ArrayList([]const u8) = .empty;
+    defer names.deinit(allocator);
+    try collectYamlSectionKeys(allocator, contents, "tasks", &names);
+
+    for (names.items) |name| {
+        defer allocator.free(name);
+        const id = try prefixedId(allocator, "task", name);
+        defer allocator.free(id);
+        const label = try std.fmt.allocPrint(allocator, "task {s}", .{name});
+        defer allocator.free(label);
+
+        try appendUniqueTask(allocator, tasks, try makeTask(
+            allocator,
+            id,
+            label,
+            &.{ "task", name },
+            project_root,
+            .taskfile,
+        ));
+    }
+}
+
+fn detectMiseTasks(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    project_root: []const u8,
+    tasks: *std.ArrayList(task.TaskSpec),
+) !void {
+    const contents = try readFirstProjectFile(allocator, io, project_root, &.{ "mise.toml", ".mise.toml" }) orelse return;
+    defer allocator.free(contents);
+
+    var names: std.ArrayList([]const u8) = .empty;
+    defer names.deinit(allocator);
+    try collectMiseTaskNames(allocator, contents, &names);
+
+    for (names.items) |name| {
+        defer allocator.free(name);
+        const id = try prefixedId(allocator, "mise", name);
+        defer allocator.free(id);
+        const label = try std.fmt.allocPrint(allocator, "mise run {s}", .{name});
+        defer allocator.free(label);
+
+        try appendUniqueTask(allocator, tasks, try makeTask(
+            allocator,
+            id,
+            label,
+            &.{ "mise", "run", name },
+            project_root,
+            .mise,
+        ));
+    }
 }
 
 fn detectDockerComposeTasks(
@@ -472,6 +703,75 @@ fn collectZigBuildSteps(
     }
 }
 
+fn collectYamlSectionKeys(
+    allocator: std.mem.Allocator,
+    contents: []const u8,
+    section_name: []const u8,
+    names: *std.ArrayList([]const u8),
+) !void {
+    var in_section = false;
+    var section_indent: usize = 0;
+
+    var lines = std.mem.splitScalar(u8, contents, '\n');
+    while (lines.next()) |raw_line| {
+        const without_cr = std.mem.trimEnd(u8, raw_line, "\r");
+        const stripped = std.mem.trimStart(u8, without_cr, " \t");
+        if (stripped.len == 0 or stripped[0] == '#') continue;
+
+        const indent = without_cr.len - stripped.len;
+        if (!in_section) {
+            const header = try std.fmt.allocPrint(allocator, "{s}:", .{section_name});
+            defer allocator.free(header);
+            if (std.mem.eql(u8, stripped, header)) {
+                in_section = true;
+                section_indent = indent;
+            }
+            continue;
+        }
+
+        if (indent <= section_indent) {
+            in_section = false;
+            continue;
+        }
+        if (indent != section_indent + 2) continue;
+
+        const colon_index = std.mem.indexOfScalar(u8, stripped, ':') orelse continue;
+        const raw_name = std.mem.trim(u8, stripped[0..colon_index], " \t");
+        const name = trimOptionalQuotes(raw_name);
+        if (!isSimpleTaskName(name)) continue;
+        try appendUniqueName(allocator, names, name);
+    }
+}
+
+fn collectMiseTaskNames(
+    allocator: std.mem.Allocator,
+    contents: []const u8,
+    names: *std.ArrayList([]const u8),
+) !void {
+    var in_tasks_table = false;
+    var lines = std.mem.splitScalar(u8, contents, '\n');
+    while (lines.next()) |raw_line| {
+        const line = std.mem.trim(u8, raw_line, " \t\r");
+        if (line.len == 0 or line[0] == '#') continue;
+
+        if (line[0] == '[') {
+            in_tasks_table = std.mem.eql(u8, line, "[tasks]");
+            if (std.mem.startsWith(u8, line, "[tasks.") and std.mem.endsWith(u8, line, "]")) {
+                const raw_name = line["[tasks.".len .. line.len - 1];
+                const name = trimOptionalQuotes(raw_name);
+                if (isSimpleTaskName(name)) try appendUniqueName(allocator, names, name);
+            }
+            continue;
+        }
+
+        if (!in_tasks_table) continue;
+        const equals_index = std.mem.indexOfScalar(u8, line, '=') orelse continue;
+        const raw_name = std.mem.trim(u8, line[0..equals_index], " \t");
+        const name = trimOptionalQuotes(raw_name);
+        if (isSimpleTaskName(name)) try appendUniqueName(allocator, names, name);
+    }
+}
+
 fn parseZigStringLiteral(
     allocator: std.mem.Allocator,
     contents: []const u8,
@@ -545,6 +845,17 @@ fn isMakeTargetName(name: []const u8) bool {
     return true;
 }
 
+fn isSimpleTaskName(name: []const u8) bool {
+    if (name.len == 0) return false;
+
+    for (name) |char| {
+        if (std.ascii.isAlphanumeric(char) or char == '_' or char == '.' or char == '-' or char == ':') continue;
+        return false;
+    }
+
+    return true;
+}
+
 fn isJustRecipeName(name: []const u8) bool {
     if (name.len == 0) return false;
     if (!(std.ascii.isAlphabetic(name[0]) or name[0] == '_')) return false;
@@ -555,6 +866,16 @@ fn isJustRecipeName(name: []const u8) bool {
     }
 
     return true;
+}
+
+fn trimOptionalQuotes(value: []const u8) []const u8 {
+    if (value.len < 2) return value;
+    if ((value[0] == '"' and value[value.len - 1] == '"') or
+        (value[0] == '\'' and value[value.len - 1] == '\''))
+    {
+        return value[1 .. value.len - 1];
+    }
+    return value;
 }
 
 fn prefixedId(allocator: std.mem.Allocator, prefix: []const u8, name: []const u8) ![]const u8 {
@@ -667,6 +988,50 @@ test "detect npm package scripts" {
     try std.testing.expectEqualStrings("npm-test", tasks[1].id);
 }
 
+test "detect package scripts with package manager metadata" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    const root = try std.Io.Dir.cwd().realPathFileAlloc(
+        std.testing.io,
+        "tests/fixtures/pnpm_project",
+        allocator,
+    );
+
+    const tasks = try detectTasks(allocator, std.testing.io, root, "missing.json");
+
+    try std.testing.expectEqual(@as(usize, 2), tasks.len);
+    try std.testing.expectEqualStrings("pnpm-dev", tasks[0].id);
+    try std.testing.expectEqualStrings("pnpm", tasks[0].argv[0]);
+    try std.testing.expectEqualStrings("run", tasks[0].argv[1]);
+    try std.testing.expectEqualStrings("dev", tasks[0].argv[2]);
+    try std.testing.expectEqual(task.TaskSource.pnpm, tasks[0].source);
+    try std.testing.expectEqualStrings("pnpm-test", tasks[1].id);
+}
+
+test "detect deno tasks" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    const root = try std.Io.Dir.cwd().realPathFileAlloc(
+        std.testing.io,
+        "tests/fixtures/deno_project",
+        allocator,
+    );
+
+    const tasks = try detectTasks(allocator, std.testing.io, root, "missing.json");
+
+    try std.testing.expectEqual(@as(usize, 2), tasks.len);
+    try std.testing.expectEqualStrings("deno-dev", tasks[0].id);
+    try std.testing.expectEqualStrings("deno", tasks[0].argv[0]);
+    try std.testing.expectEqualStrings("task", tasks[0].argv[1]);
+    try std.testing.expectEqualStrings("dev", tasks[0].argv[2]);
+    try std.testing.expectEqualStrings("deno-test", tasks[1].id);
+    try std.testing.expectEqual(task.TaskSource.deno, tasks[0].source);
+}
+
 test "detect cargo tasks" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
@@ -703,6 +1068,111 @@ test "detect go tasks" {
     try std.testing.expectEqualStrings("go-test", tasks[0].id);
     try std.testing.expectEqualStrings("go-build", tasks[1].id);
     try std.testing.expectEqualStrings("go-run", tasks[2].id);
+}
+
+test "detect python tasks" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    const root = try std.Io.Dir.cwd().realPathFileAlloc(
+        std.testing.io,
+        "tests/fixtures/python_project",
+        allocator,
+    );
+
+    const tasks = try detectTasks(allocator, std.testing.io, root, "missing.json");
+
+    try std.testing.expectEqual(@as(usize, 1), tasks.len);
+    try std.testing.expectEqualStrings("python-test", tasks[0].id);
+    try std.testing.expectEqualStrings("python", tasks[0].argv[0]);
+    try std.testing.expectEqualStrings("-m", tasks[0].argv[1]);
+    try std.testing.expectEqualStrings("pytest", tasks[0].argv[2]);
+    try std.testing.expectEqual(task.TaskSource.python, tasks[0].source);
+}
+
+test "detect ruby tasks" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    const root = try std.Io.Dir.cwd().realPathFileAlloc(
+        std.testing.io,
+        "tests/fixtures/ruby_project",
+        allocator,
+    );
+
+    const tasks = try detectTasks(allocator, std.testing.io, root, "missing.json");
+
+    try std.testing.expectEqual(@as(usize, 2), tasks.len);
+    try std.testing.expectEqualStrings("ruby-test", tasks[0].id);
+    try std.testing.expectEqualStrings("bundle", tasks[0].argv[0]);
+    try std.testing.expectEqualStrings("exec", tasks[0].argv[1]);
+    try std.testing.expectEqualStrings("ruby-rspec", tasks[1].id);
+    try std.testing.expectEqual(task.TaskSource.ruby, tasks[0].source);
+}
+
+test "detect nix flake tasks" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    const root = try std.Io.Dir.cwd().realPathFileAlloc(
+        std.testing.io,
+        "tests/fixtures/nix_project",
+        allocator,
+    );
+
+    const tasks = try detectTasks(allocator, std.testing.io, root, "missing.json");
+
+    try std.testing.expectEqual(@as(usize, 3), tasks.len);
+    try std.testing.expectEqualStrings("nix-check", tasks[0].id);
+    try std.testing.expectEqualStrings("nix-build", tasks[1].id);
+    try std.testing.expectEqualStrings("nix-develop", tasks[2].id);
+    try std.testing.expectEqual(task.TaskSource.nix, tasks[0].source);
+}
+
+test "detect taskfile tasks" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    const root = try std.Io.Dir.cwd().realPathFileAlloc(
+        std.testing.io,
+        "tests/fixtures/taskfile_project",
+        allocator,
+    );
+
+    const tasks = try detectTasks(allocator, std.testing.io, root, "missing.json");
+
+    try std.testing.expectEqual(@as(usize, 2), tasks.len);
+    try std.testing.expectEqualStrings("task-build", tasks[0].id);
+    try std.testing.expectEqualStrings("task", tasks[0].argv[0]);
+    try std.testing.expectEqualStrings("build", tasks[0].argv[1]);
+    try std.testing.expectEqualStrings("task-test", tasks[1].id);
+    try std.testing.expectEqual(task.TaskSource.taskfile, tasks[0].source);
+}
+
+test "detect mise tasks" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    const root = try std.Io.Dir.cwd().realPathFileAlloc(
+        std.testing.io,
+        "tests/fixtures/mise_project",
+        allocator,
+    );
+
+    const tasks = try detectTasks(allocator, std.testing.io, root, "missing.json");
+
+    try std.testing.expectEqual(@as(usize, 2), tasks.len);
+    try std.testing.expectEqualStrings("mise-build", tasks[0].id);
+    try std.testing.expectEqualStrings("mise", tasks[0].argv[0]);
+    try std.testing.expectEqualStrings("run", tasks[0].argv[1]);
+    try std.testing.expectEqualStrings("build", tasks[0].argv[2]);
+    try std.testing.expectEqualStrings("mise-test", tasks[1].id);
+    try std.testing.expectEqual(task.TaskSource.mise, tasks[0].source);
 }
 
 test "detect docker compose tasks" {
