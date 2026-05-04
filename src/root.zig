@@ -5,6 +5,7 @@ pub const log_buffer = @import("core/log_buffer.zig");
 pub const project = @import("core/project.zig");
 pub const config = @import("core/config.zig");
 pub const detect = @import("core/detect.zig");
+pub const fuzzy = @import("core/fuzzy.zig");
 pub const runner = @import("core/runner.zig");
 pub const git = @import("core/git.zig");
 pub const history = @import("core/history.zig");
@@ -20,6 +21,7 @@ test {
     _ = project;
     _ = config;
     _ = detect;
+    _ = fuzzy;
     _ = runner;
     _ = git;
     _ = history;

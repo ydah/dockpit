@@ -66,6 +66,7 @@ const RootWidget = struct {
     fn handleEvent(self: *RootWidget, ctx: *vxfw.EventContext, event: vxfw.Event) !void {
         switch (event) {
             .key_press => |key| {
+                if (self.handleSearchKey(ctx, key)) return;
                 if (key.matches('q', .{}) or key.matches('c', .{ .ctrl = true })) {
                     if (self.running) |job| {
                         if (!job.done.load(.acquire)) {
@@ -118,11 +119,62 @@ const RootWidget = struct {
                     self.state.dispatch(.clear_log);
                     self.state.dispatch(.{ .set_status = "log cleared" });
                     ctx.consumeAndRedraw();
+                    return;
+                }
+                if (key.matches('/', .{})) {
+                    self.state.dispatch(.enter_search);
+                    self.state.dispatch(.{ .set_status = "search" });
+                    ctx.consumeAndRedraw();
                 }
             },
             .tick => try self.pollRunning(ctx),
             else => {},
         }
+    }
+
+    fn handleSearchKey(self: *RootWidget, ctx: *vxfw.EventContext, key: vaxis.Key) bool {
+        if (self.state.mode != .search) return false;
+
+        if (key.matches(vaxis.Key.escape, .{}) or key.matches('c', .{ .ctrl = true })) {
+            self.state.dispatch(.exit_mode);
+            self.state.dispatch(.{ .set_status = "ready" });
+            ctx.consumeAndRedraw();
+            return true;
+        }
+        if (key.matches(vaxis.Key.backspace, .{})) {
+            self.state.dispatch(.backspace_search);
+            ctx.consumeAndRedraw();
+            return true;
+        }
+        if (key.matches('j', .{}) or key.matches(vaxis.Key.down, .{})) {
+            self.state.dispatch(.select_next);
+            ctx.consumeAndRedraw();
+            return true;
+        }
+        if (key.matches('k', .{}) or key.matches(vaxis.Key.up, .{})) {
+            self.state.dispatch(.select_previous);
+            ctx.consumeAndRedraw();
+            return true;
+        }
+        if (key.matches(vaxis.Key.enter, .{})) {
+            if (self.state.selectedTask()) |selected| {
+                self.startTask(ctx, selected) catch |err| {
+                    self.state.dispatch(.{ .set_status = @errorName(err) });
+                };
+            }
+            self.state.dispatch(.exit_mode);
+            ctx.consumeAndRedraw();
+            return true;
+        }
+        if (!key.mods.ctrl and !key.mods.alt) {
+            if (key.text) |text| {
+                self.state.dispatch(.{ .append_search_text = text });
+                ctx.consumeAndRedraw();
+                return true;
+            }
+        }
+
+        return false;
     }
 
     fn startTask(self: *RootWidget, ctx: *vxfw.EventContext, selected: task.TaskSpec) !void {
@@ -265,11 +317,19 @@ const RootWidget = struct {
 
         const max_rows = rect.height - 2;
         const max_width = rect.width - 4;
-        for (self.state.tasks[0..@min(self.state.tasks.len, max_rows)], 0..) |item, index| {
-            const row: u16 = rect.y + 1 + @as(u16, @intCast(index));
+        var row_index: usize = 0;
+        for (self.state.tasks, 0..) |item, index| {
+            if (!self.state.taskVisible(index)) continue;
+            if (row_index >= max_rows) break;
+
+            const row: u16 = rect.y + 1 + @as(u16, @intCast(row_index));
             const marker = if (index == self.state.selected_task) ">" else " ";
             widgets.writeText(surface, row, rect.x + 2, marker);
             widgets.writeTextClipped(surface, row, rect.x + 4, item.label, max_width);
+            row_index += 1;
+        }
+        if (row_index == 0) {
+            widgets.writeTextClipped(surface, rect.y + 1, rect.x + 2, "No matching tasks", rect.width - 4);
         }
     }
 
@@ -296,10 +356,18 @@ const RootWidget = struct {
         if (rect.height == 0 or rect.width <= 4) return;
 
         const status = if (self.state.status_message.len > 0) self.state.status_message else "ready";
-        const git_line = formatGitLine(self.allocator, self.git_enabled, self.state.git_summary) catch "git: error";
-        widgets.writeTextClipped(surface, rect.y + 1, rect.x + 2, git_line, rect.width - 4);
+        var line_buffer: [512]u8 = undefined;
+        const git_line = formatGitLine(&line_buffer, self.git_enabled, self.state.git_summary);
+        const mode_line = if (self.state.mode == .search)
+            std.fmt.bufPrint(&line_buffer, "search: {s}  matches: {d}", .{
+                self.state.search_query.items,
+                self.state.visibleTaskCount(),
+            }) catch "search"
+        else
+            git_line;
+        widgets.writeTextClipped(surface, rect.y + 1, rect.x + 2, mode_line, rect.width - 4);
         if (rect.height > 2) {
-            widgets.writeTextClipped(surface, rect.y + 2, rect.x + 2, "Enter run  r rerun  x cancel  c clear  g git  j/k move  q quit", rect.width - 4);
+            widgets.writeTextClipped(surface, rect.y + 2, rect.x + 2, "Enter run  / search  r rerun  x cancel  c clear  g git  j/k move  q quit", rect.width - 4);
             widgets.writeTextClipped(surface, rect.y + 2, rect.x + 68, status, rect.width - 4);
         }
     }
@@ -359,13 +427,13 @@ fn timestampMs(io: std.Io) u64 {
     return @intCast(std.Io.Timestamp.now(io, .real).toMilliseconds());
 }
 
-fn formatGitLine(allocator: std.mem.Allocator, enabled: bool, summary: git.GitSummary) ![]const u8 {
+fn formatGitLine(buffer: []u8, enabled: bool, summary: git.GitSummary) []const u8 {
     if (!enabled) return "git: disabled";
     if (!summary.in_repo) return "git: none";
 
-    return std.fmt.allocPrint(
-        allocator,
+    return std.fmt.bufPrint(
+        buffer,
         "branch: {s}  modified: {d}  added: {d}  deleted: {d}  untracked: {d}",
         .{ summary.branch, summary.modified, summary.added, summary.deleted, summary.untracked },
-    );
+    ) catch "git: error";
 }
