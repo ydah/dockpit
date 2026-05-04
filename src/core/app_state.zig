@@ -18,6 +18,7 @@ pub const Mode = enum {
     help,
     jobs,
     history,
+    changes,
 };
 
 pub const Action = union(enum) {

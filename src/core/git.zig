@@ -36,6 +36,56 @@ pub const WorktreeList = struct {
     }
 };
 
+pub const ChangeState = enum {
+    untracked,
+    modified,
+    added,
+    deleted,
+    renamed,
+    copied,
+    type_changed,
+    unmerged,
+    unknown,
+
+    pub fn label(state: ChangeState) []const u8 {
+        return switch (state) {
+            .untracked => "untracked",
+            .modified => "modified",
+            .added => "added",
+            .deleted => "deleted",
+            .renamed => "renamed",
+            .copied => "copied",
+            .type_changed => "type",
+            .unmerged => "unmerged",
+            .unknown => "unknown",
+        };
+    }
+};
+
+pub const ChangedFile = struct {
+    index_status: u8,
+    worktree_status: u8,
+    path: []const u8,
+    old_path: []const u8 = "",
+    staged: bool = false,
+    state: ChangeState = .unknown,
+};
+
+pub const ChangedFileList = struct {
+    allocator: std.mem.Allocator,
+    items: []ChangedFile,
+
+    pub fn deinit(self: *ChangedFileList) void {
+        for (self.items) |item| freeChangedFile(self.allocator, item);
+        if (self.items.len > 0) self.allocator.free(self.items);
+        self.* = undefined;
+    }
+};
+
+pub fn emptyChangedFiles(allocator: std.mem.Allocator) ChangedFileList {
+    return .{ .allocator = allocator, .items = &.{} };
+}
+
 pub fn loadSummary(allocator: std.mem.Allocator, io: std.Io, project_root: []const u8) GitSummary {
     const branch_result = std.process.run(allocator, io, .{
         .argv = &.{ "git", "rev-parse", "--abbrev-ref", "HEAD" },
@@ -43,6 +93,8 @@ pub fn loadSummary(allocator: std.mem.Allocator, io: std.Io, project_root: []con
         .stdout_limit = .limited(1024),
         .stderr_limit = .limited(1024),
     }) catch return .none();
+    defer allocator.free(branch_result.stdout);
+    defer allocator.free(branch_result.stderr);
     if (!isSuccess(branch_result.term)) return .none();
 
     const status_result = std.process.run(allocator, io, .{
@@ -51,6 +103,8 @@ pub fn loadSummary(allocator: std.mem.Allocator, io: std.Io, project_root: []con
         .stdout_limit = .limited(1024 * 1024),
         .stderr_limit = .limited(1024),
     }) catch return .none();
+    defer allocator.free(status_result.stdout);
+    defer allocator.free(status_result.stderr);
     if (!isSuccess(status_result.term)) return .none();
 
     var summary = parsePorcelain(status_result.stdout);
@@ -69,10 +123,61 @@ pub fn loadWorktrees(allocator: std.mem.Allocator, io: std.Io, project_root: []c
         .stdout_limit = .limited(1024 * 1024),
         .stderr_limit = .limited(1024),
     }) catch return emptyWorktrees(allocator);
+    defer allocator.free(result.stdout);
+    defer allocator.free(result.stderr);
     if (!isSuccess(result.term)) return emptyWorktrees(allocator);
 
     const items = parseWorktreePorcelain(allocator, result.stdout) catch return emptyWorktrees(allocator);
     return .{ .allocator = allocator, .items = items };
+}
+
+pub fn loadChangedFiles(allocator: std.mem.Allocator, io: std.Io, project_root: []const u8) ChangedFileList {
+    const result = std.process.run(allocator, io, .{
+        .argv = &.{ "git", "status", "--porcelain" },
+        .cwd = .{ .path = project_root },
+        .stdout_limit = .limited(1024 * 1024),
+        .stderr_limit = .limited(1024),
+    }) catch return emptyChangedFiles(allocator);
+    defer allocator.free(result.stdout);
+    defer allocator.free(result.stderr);
+    if (!isSuccess(result.term)) return emptyChangedFiles(allocator);
+
+    const items = parseChangedFiles(allocator, result.stdout) catch return emptyChangedFiles(allocator);
+    return .{ .allocator = allocator, .items = items };
+}
+
+pub fn stagePath(allocator: std.mem.Allocator, io: std.Io, project_root: []const u8, path: []const u8) !void {
+    try runGitNoOutput(allocator, io, project_root, &.{ "git", "add", "--", path });
+}
+
+pub fn unstagePath(allocator: std.mem.Allocator, io: std.Io, project_root: []const u8, path: []const u8) !void {
+    try runGitNoOutput(allocator, io, project_root, &.{ "git", "restore", "--staged", "--", path });
+}
+
+pub fn diffPath(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    project_root: []const u8,
+    path: []const u8,
+    staged: bool,
+) ![]u8 {
+    const staged_argv: []const []const u8 = &.{ "git", "diff", "--cached", "--", path };
+    const unstaged_argv: []const []const u8 = &.{ "git", "diff", "--", path };
+    const argv = if (staged) staged_argv else unstaged_argv;
+
+    const result = try std.process.run(allocator, io, .{
+        .argv = argv,
+        .cwd = .{ .path = project_root },
+        .stdout_limit = .limited(2 * 1024 * 1024),
+        .stderr_limit = .limited(256 * 1024),
+    });
+    defer allocator.free(result.stderr);
+
+    if (!isSuccess(result.term)) {
+        defer allocator.free(result.stdout);
+        return allocator.dupe(u8, result.stderr);
+    }
+    return result.stdout;
 }
 
 pub fn parseWorktreePorcelain(allocator: std.mem.Allocator, contents: []const u8) ![]Worktree {
@@ -144,11 +249,86 @@ pub fn parsePorcelain(contents: []const u8) GitSummary {
     return summary;
 }
 
+pub fn parseChangedFiles(allocator: std.mem.Allocator, contents: []const u8) ![]ChangedFile {
+    var items: std.ArrayList(ChangedFile) = .empty;
+    errdefer {
+        for (items.items) |item| freeChangedFile(allocator, item);
+        items.deinit(allocator);
+    }
+
+    var lines = std.mem.splitScalar(u8, contents, '\n');
+    while (lines.next()) |raw_line| {
+        const line = std.mem.trim(u8, raw_line, "\r");
+        if (line.len < 3) continue;
+
+        const index_status = line[0];
+        const worktree_status = line[1];
+        const raw_path = std.mem.trim(u8, line[3..], " \t");
+        if (raw_path.len == 0) continue;
+
+        var old_path: []const u8 = "";
+        var path = raw_path;
+        if (std.mem.indexOf(u8, raw_path, " -> ")) |arrow| {
+            old_path = raw_path[0..arrow];
+            path = raw_path[arrow + " -> ".len ..];
+        }
+
+        const owned_path = try allocator.dupe(u8, path);
+        errdefer allocator.free(owned_path);
+        const owned_old_path = try allocator.dupe(u8, old_path);
+        errdefer allocator.free(owned_old_path);
+
+        try items.append(allocator, .{
+            .index_status = index_status,
+            .worktree_status = worktree_status,
+            .path = owned_path,
+            .old_path = owned_old_path,
+            .staged = isStagedStatus(index_status),
+            .state = changeState(index_status, worktree_status),
+        });
+    }
+
+    return items.toOwnedSlice(allocator);
+}
+
 fn isModifiedStatus(status: u8) bool {
     return switch (status) {
         'M', 'R', 'C', 'U' => true,
         else => false,
     };
+}
+
+fn isStagedStatus(status: u8) bool {
+    return status != ' ' and status != '?';
+}
+
+fn changeState(index_status: u8, worktree_status: u8) ChangeState {
+    if (index_status == '?' and worktree_status == '?') return .untracked;
+    if (index_status == 'U' or worktree_status == 'U') return .unmerged;
+    if (index_status == 'R' or worktree_status == 'R') return .renamed;
+    if (index_status == 'C' or worktree_status == 'C') return .copied;
+    if (index_status == 'T' or worktree_status == 'T') return .type_changed;
+    if (index_status == 'A' or worktree_status == 'A') return .added;
+    if (index_status == 'D' or worktree_status == 'D') return .deleted;
+    if (index_status == 'M' or worktree_status == 'M') return .modified;
+    return .unknown;
+}
+
+fn runGitNoOutput(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    project_root: []const u8,
+    argv: []const []const u8,
+) !void {
+    const result = try std.process.run(allocator, io, .{
+        .argv = argv,
+        .cwd = .{ .path = project_root },
+        .stdout_limit = .limited(64 * 1024),
+        .stderr_limit = .limited(64 * 1024),
+    });
+    defer allocator.free(result.stdout);
+    defer allocator.free(result.stderr);
+    if (!isSuccess(result.term)) return error.GitCommandFailed;
 }
 
 fn isSuccess(term: std.process.Child.Term) bool {
@@ -173,6 +353,11 @@ fn freeWorktree(allocator: std.mem.Allocator, item: Worktree) void {
     allocator.free(item.branch);
 }
 
+fn freeChangedFile(allocator: std.mem.Allocator, item: ChangedFile) void {
+    allocator.free(item.path);
+    allocator.free(item.old_path);
+}
+
 test "parse porcelain counts statuses" {
     const summary = parsePorcelain(
         \\ M src/main.zig
@@ -195,6 +380,32 @@ test "parse porcelain ignores empty lines" {
 
     try std.testing.expectEqual(@as(usize, 0), summary.modified);
     try std.testing.expectEqual(@as(usize, 0), summary.untracked);
+}
+
+test "parse changed files from porcelain output" {
+    const items = try parseChangedFiles(std.testing.allocator,
+        \\ M src/main.zig
+        \\A  README.md
+        \\?? new.txt
+        \\R  old.txt -> moved.txt
+        \\
+    );
+    defer {
+        for (items) |item| freeChangedFile(std.testing.allocator, item);
+        std.testing.allocator.free(items);
+    }
+
+    try std.testing.expectEqual(@as(usize, 4), items.len);
+    try std.testing.expectEqualStrings("src/main.zig", items[0].path);
+    try std.testing.expect(!items[0].staged);
+    try std.testing.expectEqual(ChangeState.modified, items[0].state);
+    try std.testing.expectEqualStrings("README.md", items[1].path);
+    try std.testing.expect(items[1].staged);
+    try std.testing.expectEqual(ChangeState.added, items[1].state);
+    try std.testing.expectEqual(ChangeState.untracked, items[2].state);
+    try std.testing.expectEqualStrings("moved.txt", items[3].path);
+    try std.testing.expectEqualStrings("old.txt", items[3].old_path);
+    try std.testing.expectEqual(ChangeState.renamed, items[3].state);
 }
 
 test "parse worktree porcelain output" {

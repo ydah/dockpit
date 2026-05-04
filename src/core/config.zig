@@ -28,6 +28,7 @@ pub const KeyBindings = struct {
     cancel: []const u8 = "x",
     clear: []const u8 = "c",
     git: []const u8 = "g",
+    changes: []const u8 = "f",
     worktrees: []const u8 = "t",
     watch: []const u8 = "w",
     search: []const u8 = "/",

@@ -42,6 +42,7 @@ pub fn run(
         .state = &state,
         .settings = settings,
         .task_statuses = try allocator.alloc(TaskStatus, tasks.len),
+        .changed_files = git.emptyChangedFiles(allocator),
     };
     defer root.deinit();
     @memset(root.task_statuses, .{});
@@ -59,10 +60,12 @@ const RootWidget = struct {
     settings: config.Settings,
     task_statuses: []TaskStatus,
     history_entries: []history.Entry = &.{},
+    changed_files: git.ChangedFileList,
     jobs: std.ArrayList(*RunningJob) = .empty,
     next_job_id: usize = 1,
     selected_job_index: usize = 0,
     selected_history_index: usize = 0,
+    selected_change_index: usize = 0,
     palette_index: usize = 0,
     watch_enabled: bool = false,
     watch_snapshot: ?watch.Snapshot = null,
@@ -77,6 +80,7 @@ const RootWidget = struct {
             self.allocator.destroy(job);
         }
         self.jobs.deinit(self.allocator);
+        self.changed_files.deinit();
         self.freeHistoryEntries();
         self.allocator.free(self.task_statuses);
     }
@@ -99,6 +103,7 @@ const RootWidget = struct {
             .key_press => |key| {
                 if (try self.handleJobsKey(ctx, key)) return;
                 if (try self.handleHistoryKey(ctx, key)) return;
+                if (try self.handleChangesKey(ctx, key)) return;
                 if (self.handleHelpKey(ctx, key)) return;
                 if (self.handleSearchKey(ctx, key)) return;
                 if (self.handleLogSearchKey(ctx, key)) return;
@@ -182,6 +187,11 @@ const RootWidget = struct {
                 }
                 if (matchesBinding(key, self.settings.keybindings.git)) {
                     self.refreshGit();
+                    ctx.consumeAndRedraw();
+                    return;
+                }
+                if (matchesBinding(key, self.settings.keybindings.changes)) {
+                    try self.showChanges();
                     ctx.consumeAndRedraw();
                     return;
                 }
@@ -288,6 +298,54 @@ const RootWidget = struct {
             } else {
                 self.state.dispatch(.{ .set_status = "task missing" });
             }
+            ctx.consumeAndRedraw();
+            return true;
+        }
+
+        ctx.consumeAndRedraw();
+        return true;
+    }
+
+    fn handleChangesKey(self: *RootWidget, ctx: *vxfw.EventContext, key: vaxis.Key) !bool {
+        if (self.state.mode != .changes) return false;
+
+        if (key.matches(vaxis.Key.escape, .{}) or
+            key.matches('c', .{ .ctrl = true }) or
+            matchesBinding(key, self.settings.keybindings.quit) or
+            matchesBinding(key, self.settings.keybindings.changes))
+        {
+            self.state.dispatch(.exit_mode);
+            self.state.dispatch(.{ .set_status = "ready" });
+            ctx.consumeAndRedraw();
+            return true;
+        }
+        if (key.matches('j', .{}) or key.matches(vaxis.Key.down, .{})) {
+            if (self.selected_change_index + 1 < self.changed_files.items.len) self.selected_change_index += 1;
+            ctx.consumeAndRedraw();
+            return true;
+        }
+        if (key.matches('k', .{}) or key.matches(vaxis.Key.up, .{})) {
+            if (self.selected_change_index > 0) self.selected_change_index -= 1;
+            ctx.consumeAndRedraw();
+            return true;
+        }
+        if (matchesBinding(key, self.settings.keybindings.git)) {
+            self.refreshGit();
+            try self.refreshChanges();
+            ctx.consumeAndRedraw();
+            return true;
+        }
+        if (key.matches(' ', .{})) {
+            self.toggleSelectedChange() catch |err| {
+                self.state.dispatch(.{ .set_status = @errorName(err) });
+            };
+            ctx.consumeAndRedraw();
+            return true;
+        }
+        if (key.matches(vaxis.Key.enter, .{}) or key.matches('d', .{})) {
+            self.showSelectedDiff() catch |err| {
+                self.state.dispatch(.{ .set_status = @errorName(err) });
+            };
             ctx.consumeAndRedraw();
             return true;
         }
@@ -437,6 +495,7 @@ const RootWidget = struct {
                 self.state.dispatch(.{ .set_status = "log cleared" });
             },
             .refresh_git => self.refreshGit(),
+            .show_changes => try self.showChanges(),
             .show_worktrees => try self.showWorktrees(),
             .toggle_watch => try self.toggleWatch(ctx),
             .show_jobs => {
@@ -706,6 +765,14 @@ const RootWidget = struct {
         self.selected_history_index = @min(self.selected_history_index, self.history_entries.len - 1);
     }
 
+    fn clampSelectedChange(self: *RootWidget) void {
+        if (self.changed_files.items.len == 0) {
+            self.selected_change_index = 0;
+            return;
+        }
+        self.selected_change_index = @min(self.selected_change_index, self.changed_files.items.len - 1);
+    }
+
     fn drainJobEvents(self: *RootWidget) !void {
         for (self.jobs.items) |job| {
             try self.drainJobEvent(job, false);
@@ -764,6 +831,70 @@ const RootWidget = struct {
             return;
         }
         self.state.dispatch(.{ .set_git = git.loadSummary(self.allocator, self.io, self.state.project_root) });
+    }
+
+    fn showChanges(self: *RootWidget) !void {
+        if (!self.git_enabled) {
+            self.state.dispatch(.{ .set_status = "git disabled" });
+            return;
+        }
+
+        try self.refreshChanges();
+        self.state.dispatch(.exit_mode);
+        self.state.mode = .changes;
+        self.state.dispatch(.{ .set_status = "git changes" });
+    }
+
+    fn refreshChanges(self: *RootWidget) !void {
+        const next = git.loadChangedFiles(self.allocator, self.io, self.state.project_root);
+        self.changed_files.deinit();
+        self.changed_files = next;
+        self.clampSelectedChange();
+    }
+
+    fn toggleSelectedChange(self: *RootWidget) !void {
+        if (self.changed_files.items.len == 0) {
+            self.state.dispatch(.{ .set_status = "no changes" });
+            return;
+        }
+
+        self.clampSelectedChange();
+        const item = self.changed_files.items[self.selected_change_index];
+        if (item.staged) {
+            try git.unstagePath(self.allocator, self.io, self.state.project_root, item.path);
+            self.state.dispatch(.{ .set_status = "unstaged" });
+        } else {
+            try git.stagePath(self.allocator, self.io, self.state.project_root, item.path);
+            self.state.dispatch(.{ .set_status = "staged" });
+        }
+        self.refreshGit();
+        try self.refreshChanges();
+    }
+
+    fn showSelectedDiff(self: *RootWidget) !void {
+        if (self.changed_files.items.len == 0) {
+            self.state.dispatch(.{ .set_status = "no changes" });
+            return;
+        }
+
+        self.clampSelectedChange();
+        const item = self.changed_files.items[self.selected_change_index];
+        const diff = try git.diffPath(self.allocator, self.io, self.state.project_root, item.path, item.staged);
+        defer self.allocator.free(diff);
+
+        const title = try std.fmt.allocPrint(self.allocator, "Git diff: {s}", .{item.path});
+        defer self.allocator.free(title);
+        try self.state.log.push(.system, title, timestampMs(self.io));
+        var lines = std.mem.splitScalar(u8, diff, '\n');
+        var count: usize = 0;
+        while (lines.next()) |raw_line| {
+            const line = std.mem.trim(u8, raw_line, "\r");
+            if (line.len == 0) continue;
+            try self.state.log.push(.stdout, line, timestampMs(self.io));
+            count += 1;
+        }
+        if (count == 0) try self.state.log.push(.system, "(no diff output)", timestampMs(self.io));
+        self.state.dispatch(.{ .set_status = "diff shown" });
     }
 
     fn showWorktrees(self: *RootWidget) !void {
@@ -898,6 +1029,10 @@ const RootWidget = struct {
             self.drawHistory(surface, rect);
             return;
         }
+        if (self.state.mode == .changes) {
+            self.drawChanges(surface, rect);
+            return;
+        }
 
         const title = if (self.state.mode == .log_search)
             "Output Search"
@@ -963,6 +1098,7 @@ const RootWidget = struct {
             ":  command palette",
             "J  show running jobs",
             "h  show run history",
+            "f  show Git changes; Space stage/unstage; Enter show diff",
             "r  rerun last task",
             "x  cancel newest running task",
             "w  toggle file-watch rerun",
@@ -1037,6 +1173,36 @@ const RootWidget = struct {
         }
     }
 
+    fn drawChanges(self: *RootWidget, surface: vxfw.Surface, rect: layout.Rect) void {
+        widgets.drawBox(surface, rect, "Git Changes");
+        if (rect.height <= 2 or rect.width <= 4) return;
+        if (self.changed_files.items.len == 0) {
+            widgets.writeTextClipped(surface, rect.y + 1, rect.x + 2, "No changes", rect.width - 4);
+            return;
+        }
+
+        const max_rows = rect.height - 2;
+        self.clampSelectedChange();
+        const first = if (self.selected_change_index >= max_rows)
+            self.selected_change_index - max_rows + 1
+        else
+            0;
+        for (self.changed_files.items[first..], 0..) |item, offset| {
+            if (offset >= max_rows) break;
+            const index = first + offset;
+            const row: u16 = rect.y + 1 + @as(u16, @intCast(offset));
+            const marker = if (index == self.selected_change_index) ">" else " ";
+            const staged = if (item.staged) "staged" else "work";
+            const line = std.fmt.allocPrint(
+                self.allocator,
+                "{s} {s:<9} {s:<7} {s}",
+                .{ marker, item.state.label(), staged, item.path },
+            ) catch item.path;
+            defer if (line.ptr != item.path.ptr) self.allocator.free(line);
+            widgets.writeTextClipped(surface, row, rect.x + 2, line, rect.width - 4);
+        }
+    }
+
     fn drawStatus(self: *RootWidget, arena: std.mem.Allocator, surface: vxfw.Surface, rect: layout.Rect) void {
         widgets.drawBox(surface, rect, "Status");
         if (rect.height == 0 or rect.width <= 4) return;
@@ -1062,6 +1228,8 @@ const RootWidget = struct {
             "jobs: j/k select  x cancel  Esc close"
         else if (self.state.mode == .history)
             "history: j/k select  Enter rerun  Esc close"
+        else if (self.state.mode == .changes)
+            "changes: j/k select  Space stage  Enter diff  g refresh  Esc close"
         else if (running_count > 0)
             std.fmt.allocPrint(arena, "running: {d}  {s}", .{ running_count, git_line }) catch "running"
         else if (self.watch_enabled)
@@ -1071,7 +1239,7 @@ const RootWidget = struct {
         const status_line = std.fmt.allocPrint(arena, "{s}  status: {s}", .{ mode_line, status }) catch mode_line;
         widgets.writeTextClippedStyled(surface, rect.y + 1, rect.x + 2, status_line, rect.width - 4, statusStyle(self.settings.theme));
         if (rect.height > 2) {
-            widgets.writeTextClipped(surface, rect.y + 2, rect.x + 2, "Enter run / find : cmds J jobs h history Tab pane ? help w watch t trees r rerun x stop c clear g git q quit", rect.width - 4);
+            widgets.writeTextClipped(surface, rect.y + 2, rect.x + 2, "Enter run / find : cmds J jobs h history f files Tab pane ? help w watch t trees r rerun x stop c clear g git q quit", rect.width - 4);
         }
     }
 };
@@ -1097,6 +1265,7 @@ const PaletteCommandId = enum {
     rerun_last,
     clear_output,
     refresh_git,
+    show_changes,
     show_worktrees,
     toggle_watch,
     show_jobs,
@@ -1115,6 +1284,7 @@ const palette_commands = [_]PaletteCommand{
     .{ .id = .rerun_last, .label = "Rerun last task" },
     .{ .id = .clear_output, .label = "Clear output" },
     .{ .id = .refresh_git, .label = "Refresh Git status" },
+    .{ .id = .show_changes, .label = "Show Git changes" },
     .{ .id = .show_worktrees, .label = "Show Git worktrees" },
     .{ .id = .toggle_watch, .label = "Toggle file watch" },
     .{ .id = .show_jobs, .label = "Show running jobs" },

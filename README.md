@@ -66,6 +66,7 @@ zig build run -- --strict-config --print-tasks
 | `x` | Cancel the newest running task |
 | `c` | Clear output |
 | `g` | Refresh Git status |
+| `f` | Show Git changes |
 | `t` | Show Git worktrees |
 | `J` | Show running jobs |
 | `h` | Show run history |
@@ -109,7 +110,7 @@ Create `.dockpit.json` in the project root:
 
 `cmd` must be an argv array. `dockpit` does not run user-configured commands through a shell. Task metadata fields are optional: `description`, `group`, `default`, and `watch`.
 
-Supported themes are `default`, `dark`, `light`, and `high-contrast`. Keybinding names include `run`, `rerun`, `cancel`, `clear`, `git`, `worktrees`, `jobs`, `history`, `watch`, `search`, `palette`, `focus`, `help`, and `quit`.
+Supported themes are `default`, `dark`, `light`, and `high-contrast`. Keybinding names include `run`, `rerun`, `cancel`, `clear`, `git`, `changes`, `worktrees`, `jobs`, `history`, `watch`, `search`, `palette`, `focus`, `help`, and `quit`.
 
 ## Auto Detection
 
@@ -130,13 +131,14 @@ Supported themes are `default`, `dark`, `light`, and `high-contrast`. Keybinding
 | `flake.nix` | `nix flake check`, `nix build`, `nix develop` |
 | `Taskfile.yml` / `Taskfile.yaml` | `task <name>` |
 | `mise.toml` / `.mise.toml` | `mise run <name>` |
-| `compose.yaml` / `compose.yml` / `docker-compose.yml` / `docker-compose.yaml` | Docker Compose up/down/ps/logs |
+| `compose.yaml` / `compose.yml` / `docker-compose.yml` / `docker-compose.yaml` | Docker Compose up/down/ps/logs plus service up/restart/logs/build tasks |
 
 ## Runtime Notes
 
 - Multiple tasks can run concurrently in background threads.
 - TUI task output streams while tasks are running.
 - `x` requests cancellation and terminates the child process for running background tasks.
+- The Git changes view supports `Space` to stage or unstage the selected file and `Enter` to append a diff to output.
 - File watching uses a portable polling snapshot and ignores generated directories such as `.git`, `.zig-cache`, `zig-out`, `node_modules`, `target`, and `.dockpit`.
 - Per-project run history is stored in `.dockpit/history.log`.
 - Interactive commands should be exposed as non-interactive tasks; dockpit does not allocate a PTY.
