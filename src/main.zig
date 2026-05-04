@@ -41,13 +41,9 @@ pub fn main(init: std.process.Init) !void {
         return;
     }
 
-    const io = init.io;
-    var buffer: [1024]u8 = undefined;
-    var stdout_file_writer: Io.File.Writer = .init(.stdout(), io, &buffer);
-    const stdout = &stdout_file_writer.interface;
-
-    try stdout.writeAll("dockpit: no mode selected yet\n");
-    try stdout.flush();
+    const project_root = try dockpit.project.discoverRoot(arena, init.io, options.project_dir orelse ".");
+    const tasks = try dockpit.detect.detectTasks(arena, init.io, project_root, options.config_path);
+    try dockpit.tui.run(arena, init.io, init.environ_map, project_root, tasks);
 }
 
 fn printVersion(io: std.Io) !void {

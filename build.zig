@@ -3,12 +3,17 @@ const std = @import("std");
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
+    const vaxis_dep = b.dependency("vaxis", .{
+        .target = target,
+        .optimize = optimize,
+    });
 
     const dockpit_mod = b.addModule("dockpit", .{
         .root_source_file = b.path("src/root.zig"),
         .target = target,
         .optimize = optimize,
     });
+    dockpit_mod.addImport("vaxis", vaxis_dep.module("vaxis"));
 
     const exe_mod = b.createModule(.{
         .root_source_file = b.path("src/main.zig"),

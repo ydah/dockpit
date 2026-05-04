@@ -8,6 +8,7 @@ pub const detect = @import("core/detect.zig");
 pub const runner = @import("core/runner.zig");
 pub const git = @import("core/git.zig");
 pub const app_state = @import("core/app_state.zig");
+pub const tui = @import("ui/tui.zig");
 
 test {
     _ = version;
@@ -20,4 +21,5 @@ test {
     _ = runner;
     _ = git;
     _ = app_state;
+    _ = tui;
 }
