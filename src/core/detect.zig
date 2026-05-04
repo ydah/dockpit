@@ -19,6 +19,8 @@ pub fn detectTasks(
     }
 
     try detectZigTasks(allocator, io, project_root, &tasks);
+    try detectMakeTasks(allocator, io, project_root, &tasks);
+    try detectJustTasks(allocator, io, project_root, &tasks);
 
     return tasks.toOwnedSlice(allocator);
 }
@@ -47,6 +49,73 @@ fn detectZigTasks(
         project_root,
         .zig,
     ));
+}
+
+fn detectMakeTasks(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    project_root: []const u8,
+    tasks: *std.ArrayList(task.TaskSpec),
+) !void {
+    const contents = try readFirstProjectFile(allocator, io, project_root, &.{ "Makefile", "makefile" }) orelse return;
+    defer allocator.free(contents);
+
+    var targets: std.ArrayList([]const u8) = .empty;
+    defer targets.deinit(allocator);
+
+    try collectPhonyMakeTargets(allocator, contents, &targets);
+    if (targets.items.len == 0) {
+        try collectMakeRuleTargets(allocator, contents, &targets);
+    }
+
+    for (targets.items) |target| {
+        defer allocator.free(target);
+        const id = try prefixedId(allocator, "make", target);
+        defer allocator.free(id);
+        const label = try prefixedLabel(allocator, "make", target);
+        defer allocator.free(label);
+
+        try appendUniqueTask(allocator, tasks, try makeTask(
+            allocator,
+            id,
+            label,
+            &.{ "make", target },
+            project_root,
+            .make,
+        ));
+    }
+}
+
+fn detectJustTasks(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    project_root: []const u8,
+    tasks: *std.ArrayList(task.TaskSpec),
+) !void {
+    const contents = try readFirstProjectFile(allocator, io, project_root, &.{ "justfile", "Justfile" }) orelse return;
+    defer allocator.free(contents);
+
+    var lines = std.mem.splitScalar(u8, contents, '\n');
+    while (lines.next()) |raw_line| {
+        const line = std.mem.trim(u8, raw_line, "\r");
+        const colon_index = std.mem.indexOfScalar(u8, line, ':') orelse continue;
+        const name = line[0..colon_index];
+        if (!isJustRecipeName(name)) continue;
+
+        const id = try prefixedId(allocator, "just", name);
+        defer allocator.free(id);
+        const label = try prefixedLabel(allocator, "just", name);
+        defer allocator.free(label);
+
+        try appendUniqueTask(allocator, tasks, try makeTask(
+            allocator,
+            id,
+            label,
+            &.{ "just", name },
+            project_root,
+            .just,
+        ));
+    }
 }
 
 fn appendUniqueTask(
@@ -106,6 +175,102 @@ fn hasFile(allocator: std.mem.Allocator, io: std.Io, project_root: []const u8, n
     return true;
 }
 
+fn readFirstProjectFile(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    project_root: []const u8,
+    names: []const []const u8,
+) !?[]u8 {
+    for (names) |name| {
+        const path = try std.fs.path.join(allocator, &.{ project_root, name });
+        defer allocator.free(path);
+
+        return std.Io.Dir.cwd().readFileAlloc(io, path, allocator, .limited(1024 * 1024)) catch |err| switch (err) {
+            error.FileNotFound, error.NotDir => continue,
+            else => |e| return e,
+        };
+    }
+
+    return null;
+}
+
+fn collectPhonyMakeTargets(
+    allocator: std.mem.Allocator,
+    contents: []const u8,
+    targets: *std.ArrayList([]const u8),
+) !void {
+    var lines = std.mem.splitScalar(u8, contents, '\n');
+    while (lines.next()) |raw_line| {
+        const line = std.mem.trim(u8, raw_line, " \t\r");
+        if (!std.mem.startsWith(u8, line, ".PHONY:")) continue;
+
+        var names = std.mem.tokenizeAny(u8, line[".PHONY:".len..], " \t");
+        while (names.next()) |name| {
+            if (!isMakeTargetName(name)) continue;
+            try appendUniqueName(allocator, targets, name);
+        }
+    }
+}
+
+fn collectMakeRuleTargets(
+    allocator: std.mem.Allocator,
+    contents: []const u8,
+    targets: *std.ArrayList([]const u8),
+) !void {
+    var lines = std.mem.splitScalar(u8, contents, '\n');
+    while (lines.next()) |raw_line| {
+        const line = std.mem.trim(u8, raw_line, "\r");
+        const colon_index = std.mem.indexOfScalar(u8, line, ':') orelse continue;
+        const name = line[0..colon_index];
+        if (!isMakeTargetName(name)) continue;
+        try appendUniqueName(allocator, targets, name);
+    }
+}
+
+fn appendUniqueName(
+    allocator: std.mem.Allocator,
+    names: *std.ArrayList([]const u8),
+    name: []const u8,
+) !void {
+    for (names.items) |existing| {
+        if (std.mem.eql(u8, existing, name)) return;
+    }
+
+    try names.append(allocator, try allocator.dupe(u8, name));
+}
+
+fn isMakeTargetName(name: []const u8) bool {
+    if (name.len == 0) return false;
+    if (std.mem.indexOfAny(u8, name, " \t/%") != null) return false;
+
+    for (name) |char| {
+        if (std.ascii.isAlphanumeric(char) or char == '_' or char == '.' or char == '-') continue;
+        return false;
+    }
+
+    return true;
+}
+
+fn isJustRecipeName(name: []const u8) bool {
+    if (name.len == 0) return false;
+    if (!(std.ascii.isAlphabetic(name[0]) or name[0] == '_')) return false;
+
+    for (name[1..]) |char| {
+        if (std.ascii.isAlphanumeric(char) or char == '_' or char == '-') continue;
+        return false;
+    }
+
+    return true;
+}
+
+fn prefixedId(allocator: std.mem.Allocator, prefix: []const u8, name: []const u8) ![]const u8 {
+    return std.fmt.allocPrint(allocator, "{s}-{s}", .{ prefix, name });
+}
+
+fn prefixedLabel(allocator: std.mem.Allocator, prefix: []const u8, name: []const u8) ![]const u8 {
+    return std.fmt.allocPrint(allocator, "{s} {s}", .{ prefix, name });
+}
+
 test "detect zig project tasks" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
@@ -122,6 +287,46 @@ test "detect zig project tasks" {
     try std.testing.expectEqual(@as(usize, 2), tasks.len);
     try std.testing.expectEqualStrings("zig-build", tasks[0].id);
     try std.testing.expectEqualStrings("zig-test", tasks[1].id);
+}
+
+test "detect make tasks from phony targets" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    const root = try std.Io.Dir.cwd().realPathFileAlloc(
+        std.testing.io,
+        "tests/fixtures/make_project",
+        allocator,
+    );
+
+    const tasks = try detectTasks(allocator, std.testing.io, root, "missing.json");
+
+    try std.testing.expectEqual(@as(usize, 2), tasks.len);
+    try std.testing.expectEqualStrings("make-build", tasks[0].id);
+    try std.testing.expectEqualStrings("make", tasks[0].argv[0]);
+    try std.testing.expectEqualStrings("build", tasks[0].argv[1]);
+    try std.testing.expectEqualStrings("make-test", tasks[1].id);
+}
+
+test "detect just tasks from simple recipes" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    const root = try std.Io.Dir.cwd().realPathFileAlloc(
+        std.testing.io,
+        "tests/fixtures/just_project",
+        allocator,
+    );
+
+    const tasks = try detectTasks(allocator, std.testing.io, root, "missing.json");
+
+    try std.testing.expectEqual(@as(usize, 2), tasks.len);
+    try std.testing.expectEqualStrings("just-build", tasks[0].id);
+    try std.testing.expectEqualStrings("just", tasks[0].argv[0]);
+    try std.testing.expectEqualStrings("build", tasks[0].argv[1]);
+    try std.testing.expectEqualStrings("just-test", tasks[1].id);
 }
 
 test "detect keeps config task over duplicate zig id" {

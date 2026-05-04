@@ -1,0 +1,8 @@
+build:
+    echo build
+
+test:
+    echo test
+
+with-arg name:
+    echo {{name}}
