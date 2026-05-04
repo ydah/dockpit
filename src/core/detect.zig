@@ -21,6 +21,9 @@ pub fn detectTasks(
     try detectZigTasks(allocator, io, project_root, &tasks);
     try detectMakeTasks(allocator, io, project_root, &tasks);
     try detectJustTasks(allocator, io, project_root, &tasks);
+    try detectNpmTasks(allocator, io, project_root, &tasks);
+    try detectCargoTasks(allocator, io, project_root, &tasks);
+    try detectGoTasks(allocator, io, project_root, &tasks);
 
     return tasks.toOwnedSlice(allocator);
 }
@@ -116,6 +119,112 @@ fn detectJustTasks(
             .just,
         ));
     }
+}
+
+fn detectNpmTasks(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    project_root: []const u8,
+    tasks: *std.ArrayList(task.TaskSpec),
+) !void {
+    const contents = try readFirstProjectFile(allocator, io, project_root, &.{"package.json"}) orelse return;
+    defer allocator.free(contents);
+
+    var parsed = try std.json.parseFromSlice(std.json.Value, allocator, contents, .{});
+    defer parsed.deinit();
+
+    const root = parsed.value;
+    if (root != .object) return;
+    const scripts = root.object.get("scripts") orelse return;
+    if (scripts != .object) return;
+
+    var iterator = scripts.object.iterator();
+    while (iterator.next()) |entry| {
+        if (entry.value_ptr.* != .string) continue;
+
+        const name = entry.key_ptr.*;
+        const id = try prefixedId(allocator, "npm", name);
+        defer allocator.free(id);
+        const label = try std.fmt.allocPrint(allocator, "npm run {s}", .{name});
+        defer allocator.free(label);
+
+        try appendUniqueTask(allocator, tasks, try makeTask(
+            allocator,
+            id,
+            label,
+            &.{ "npm", "run", name },
+            project_root,
+            .npm,
+        ));
+    }
+}
+
+fn detectCargoTasks(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    project_root: []const u8,
+    tasks: *std.ArrayList(task.TaskSpec),
+) !void {
+    if (!try hasFile(allocator, io, project_root, "Cargo.toml")) return;
+
+    try appendUniqueTask(allocator, tasks, try makeTask(
+        allocator,
+        "cargo-build",
+        "cargo build",
+        &.{ "cargo", "build" },
+        project_root,
+        .cargo,
+    ));
+    try appendUniqueTask(allocator, tasks, try makeTask(
+        allocator,
+        "cargo-test",
+        "cargo test",
+        &.{ "cargo", "test" },
+        project_root,
+        .cargo,
+    ));
+    try appendUniqueTask(allocator, tasks, try makeTask(
+        allocator,
+        "cargo-run",
+        "cargo run",
+        &.{ "cargo", "run" },
+        project_root,
+        .cargo,
+    ));
+}
+
+fn detectGoTasks(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    project_root: []const u8,
+    tasks: *std.ArrayList(task.TaskSpec),
+) !void {
+    if (!try hasFile(allocator, io, project_root, "go.mod")) return;
+
+    try appendUniqueTask(allocator, tasks, try makeTask(
+        allocator,
+        "go-test",
+        "go test ./...",
+        &.{ "go", "test", "./..." },
+        project_root,
+        .go,
+    ));
+    try appendUniqueTask(allocator, tasks, try makeTask(
+        allocator,
+        "go-build",
+        "go build ./...",
+        &.{ "go", "build", "./..." },
+        project_root,
+        .go,
+    ));
+    try appendUniqueTask(allocator, tasks, try makeTask(
+        allocator,
+        "go-run",
+        "go run .",
+        &.{ "go", "run", "." },
+        project_root,
+        .go,
+    ));
 }
 
 fn appendUniqueTask(
@@ -327,6 +436,65 @@ test "detect just tasks from simple recipes" {
     try std.testing.expectEqualStrings("just", tasks[0].argv[0]);
     try std.testing.expectEqualStrings("build", tasks[0].argv[1]);
     try std.testing.expectEqualStrings("just-test", tasks[1].id);
+}
+
+test "detect npm package scripts" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    const root = try std.Io.Dir.cwd().realPathFileAlloc(
+        std.testing.io,
+        "tests/fixtures/node_project",
+        allocator,
+    );
+
+    const tasks = try detectTasks(allocator, std.testing.io, root, "missing.json");
+
+    try std.testing.expectEqual(@as(usize, 2), tasks.len);
+    try std.testing.expectEqualStrings("npm-dev", tasks[0].id);
+    try std.testing.expectEqualStrings("npm", tasks[0].argv[0]);
+    try std.testing.expectEqualStrings("run", tasks[0].argv[1]);
+    try std.testing.expectEqualStrings("dev", tasks[0].argv[2]);
+    try std.testing.expectEqualStrings("npm-test", tasks[1].id);
+}
+
+test "detect cargo tasks" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    const root = try std.Io.Dir.cwd().realPathFileAlloc(
+        std.testing.io,
+        "tests/fixtures/cargo_project",
+        allocator,
+    );
+
+    const tasks = try detectTasks(allocator, std.testing.io, root, "missing.json");
+
+    try std.testing.expectEqual(@as(usize, 3), tasks.len);
+    try std.testing.expectEqualStrings("cargo-build", tasks[0].id);
+    try std.testing.expectEqualStrings("cargo-test", tasks[1].id);
+    try std.testing.expectEqualStrings("cargo-run", tasks[2].id);
+}
+
+test "detect go tasks" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    const root = try std.Io.Dir.cwd().realPathFileAlloc(
+        std.testing.io,
+        "tests/fixtures/go_project",
+        allocator,
+    );
+
+    const tasks = try detectTasks(allocator, std.testing.io, root, "missing.json");
+
+    try std.testing.expectEqual(@as(usize, 3), tasks.len);
+    try std.testing.expectEqualStrings("go-test", tasks[0].id);
+    try std.testing.expectEqualStrings("go-build", tasks[1].id);
+    try std.testing.expectEqualStrings("go-run", tasks[2].id);
 }
 
 test "detect keeps config task over duplicate zig id" {
