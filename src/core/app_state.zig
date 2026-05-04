@@ -13,7 +13,9 @@ pub const Pane = enum {
 pub const Mode = enum {
     normal,
     search,
+    log_search,
     palette,
+    help,
 };
 
 pub const Action = union(enum) {
@@ -22,9 +24,15 @@ pub const Action = union(enum) {
     focus_next,
     clear_log,
     enter_search,
+    enter_log_search,
     exit_mode,
     append_search_text: []const u8,
     backspace_search,
+    append_log_search_text: []const u8,
+    backspace_log_search,
+    scroll_output_up,
+    scroll_output_down,
+    scroll_output_end,
     set_status: []const u8,
     set_git: git.GitSummary,
     set_last_task: []const u8,
@@ -38,6 +46,8 @@ pub const AppState = struct {
     focused_pane: Pane = .tasks,
     mode: Mode = .normal,
     search_query: std.ArrayList(u8) = .empty,
+    log_search_query: std.ArrayList(u8) = .empty,
+    output_scroll: usize = 0,
     log: log_buffer.LogBuffer,
     git_summary: git.GitSummary = .{},
     last_task_id: ?[]const u8 = null,
@@ -60,6 +70,7 @@ pub const AppState = struct {
 
     pub fn deinit(self: *AppState) void {
         self.search_query.deinit(self.allocator);
+        self.log_search_query.deinit(self.allocator);
         self.log.deinit();
         self.* = undefined;
     }
@@ -69,11 +80,26 @@ pub const AppState = struct {
             .select_previous => self.selectPrevious(),
             .select_next => self.selectNext(),
             .focus_next => self.focused_pane = if (self.focused_pane == .tasks) .output else .tasks,
-            .clear_log => self.log.clear(),
-            .enter_search => self.mode = .search,
+            .clear_log => {
+                self.log.clear();
+                self.output_scroll = 0;
+            },
+            .enter_search => {
+                self.focused_pane = .tasks;
+                self.mode = .search;
+            },
+            .enter_log_search => {
+                self.focused_pane = .output;
+                self.mode = .log_search;
+            },
             .exit_mode => self.mode = .normal,
             .append_search_text => |text| self.appendSearchText(text) catch {},
             .backspace_search => self.backspaceSearch(),
+            .append_log_search_text => |text| self.appendLogSearchText(text) catch {},
+            .backspace_log_search => self.backspaceLogSearch(),
+            .scroll_output_up => self.scrollOutputUp(),
+            .scroll_output_down => self.scrollOutputDown(),
+            .scroll_output_end => self.output_scroll = 0,
             .set_status => |message| self.status_message = message,
             .set_git => |summary| self.git_summary = summary,
             .set_last_task => |task_id| self.last_task_id = task_id,
@@ -99,6 +125,21 @@ pub const AppState = struct {
         var count: usize = 0;
         for (0..self.tasks.len) |index| {
             if (self.taskVisible(index)) count += 1;
+        }
+        return count;
+    }
+
+    pub fn logVisible(self: AppState, index: usize) bool {
+        if (index >= self.log.items().len) return false;
+        if (self.log_search_query.items.len == 0) return true;
+        const line = self.log.items()[index];
+        return fuzzy.matches(self.log_search_query.items, line.text);
+    }
+
+    pub fn visibleLogCount(self: AppState) usize {
+        var count: usize = 0;
+        for (0..self.log.items().len) |index| {
+            if (self.logVisible(index)) count += 1;
         }
         return count;
     }
@@ -135,6 +176,27 @@ pub const AppState = struct {
         if (self.search_query.items.len == 0) return;
         _ = self.search_query.pop();
         self.ensureSelectionVisible();
+    }
+
+    fn appendLogSearchText(self: *AppState, text: []const u8) !void {
+        try self.log_search_query.appendSlice(self.allocator, text);
+        self.output_scroll = 0;
+    }
+
+    fn backspaceLogSearch(self: *AppState) void {
+        if (self.log_search_query.items.len == 0) return;
+        _ = self.log_search_query.pop();
+        self.output_scroll = 0;
+    }
+
+    fn scrollOutputUp(self: *AppState) void {
+        const max_scroll = if (self.visibleLogCount() > 0) self.visibleLogCount() - 1 else 0;
+        self.output_scroll = @min(self.output_scroll + 1, max_scroll);
+    }
+
+    fn scrollOutputDown(self: *AppState) void {
+        if (self.output_scroll == 0) return;
+        self.output_scroll -= 1;
     }
 
     fn ensureSelectionVisible(self: *AppState) void {
@@ -213,4 +275,28 @@ test "app state toggles focus and updates status" {
 
     try std.testing.expectEqual(Pane.output, state.focused_pane);
     try std.testing.expectEqualStrings("ready", state.status_message);
+}
+
+test "app state filters and scrolls output" {
+    var state = AppState.init(std.testing.allocator, ".", &.{}, .{});
+    defer state.deinit();
+
+    try state.log.push(.stdout, "build ok", 1);
+    try state.log.push(.stderr, "test failed", 2);
+    state.dispatch(.enter_log_search);
+    state.dispatch(.{ .append_log_search_text = "tf" });
+
+    try std.testing.expectEqual(Mode.log_search, state.mode);
+    try std.testing.expectEqual(@as(usize, 1), state.visibleLogCount());
+    try std.testing.expect(state.logVisible(1));
+
+    state.dispatch(.scroll_output_up);
+    try std.testing.expectEqual(@as(usize, 0), state.output_scroll);
+    state.dispatch(.backspace_log_search);
+    state.dispatch(.backspace_log_search);
+    try std.testing.expectEqual(@as(usize, 2), state.visibleLogCount());
+    state.dispatch(.scroll_output_up);
+    try std.testing.expectEqual(@as(usize, 1), state.output_scroll);
+    state.dispatch(.scroll_output_down);
+    try std.testing.expectEqual(@as(usize, 0), state.output_scroll);
 }

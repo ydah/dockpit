@@ -32,6 +32,8 @@ pub const KeyBindings = struct {
     watch: []const u8 = "w",
     search: []const u8 = "/",
     palette: []const u8 = ":",
+    focus: []const u8 = "tab",
+    help: []const u8 = "?",
     quit: []const u8 = "q",
 };
 

@@ -88,7 +88,9 @@ const RootWidget = struct {
     fn handleEvent(self: *RootWidget, ctx: *vxfw.EventContext, event: vxfw.Event) !void {
         switch (event) {
             .key_press => |key| {
+                if (self.handleHelpKey(ctx, key)) return;
                 if (self.handleSearchKey(ctx, key)) return;
+                if (self.handleLogSearchKey(ctx, key)) return;
                 if (try self.handlePaletteKey(ctx, key)) return;
                 if (matchesBinding(key, self.settings.keybindings.quit) or key.matches('c', .{ .ctrl = true })) {
                     try self.finishCompletedJobs();
@@ -101,13 +103,34 @@ const RootWidget = struct {
                     ctx.consume_event = true;
                     return;
                 }
+                if (matchesBinding(key, self.settings.keybindings.focus)) {
+                    self.state.dispatch(.focus_next);
+                    self.state.dispatch(.{ .set_status = self.focusLabel() });
+                    ctx.consumeAndRedraw();
+                    return;
+                }
+                if (matchesBinding(key, self.settings.keybindings.help)) {
+                    self.state.dispatch(.exit_mode);
+                    self.state.mode = .help;
+                    self.state.dispatch(.{ .set_status = "help" });
+                    ctx.consumeAndRedraw();
+                    return;
+                }
                 if (key.matches('j', .{}) or key.matches(vaxis.Key.down, .{})) {
-                    self.state.dispatch(.select_next);
+                    if (self.state.focused_pane == .output) {
+                        self.state.dispatch(.scroll_output_down);
+                    } else {
+                        self.state.dispatch(.select_next);
+                    }
                     ctx.consumeAndRedraw();
                     return;
                 }
                 if (key.matches('k', .{}) or key.matches(vaxis.Key.up, .{})) {
-                    self.state.dispatch(.select_previous);
+                    if (self.state.focused_pane == .output) {
+                        self.state.dispatch(.scroll_output_up);
+                    } else {
+                        self.state.dispatch(.select_previous);
+                    }
                     ctx.consumeAndRedraw();
                     return;
                 }
@@ -152,8 +175,13 @@ const RootWidget = struct {
                     return;
                 }
                 if (matchesBinding(key, self.settings.keybindings.search)) {
-                    self.state.dispatch(.enter_search);
-                    self.state.dispatch(.{ .set_status = "search" });
+                    if (self.state.focused_pane == .output) {
+                        self.state.dispatch(.enter_log_search);
+                        self.state.dispatch(.{ .set_status = "output search" });
+                    } else {
+                        self.state.dispatch(.enter_search);
+                        self.state.dispatch(.{ .set_status = "search" });
+                    }
                     ctx.consumeAndRedraw();
                     return;
                 }
@@ -213,6 +241,64 @@ const RootWidget = struct {
         }
 
         return false;
+    }
+
+    fn handleLogSearchKey(self: *RootWidget, ctx: *vxfw.EventContext, key: vaxis.Key) bool {
+        if (self.state.mode != .log_search) return false;
+
+        if (key.matches(vaxis.Key.escape, .{}) or key.matches('c', .{ .ctrl = true })) {
+            self.state.dispatch(.exit_mode);
+            self.state.dispatch(.{ .set_status = "ready" });
+            ctx.consumeAndRedraw();
+            return true;
+        }
+        if (key.matches(vaxis.Key.backspace, .{})) {
+            self.state.dispatch(.backspace_log_search);
+            ctx.consumeAndRedraw();
+            return true;
+        }
+        if (key.matches('j', .{}) or key.matches(vaxis.Key.down, .{})) {
+            self.state.dispatch(.scroll_output_down);
+            ctx.consumeAndRedraw();
+            return true;
+        }
+        if (key.matches('k', .{}) or key.matches(vaxis.Key.up, .{})) {
+            self.state.dispatch(.scroll_output_up);
+            ctx.consumeAndRedraw();
+            return true;
+        }
+        if (key.matches(vaxis.Key.enter, .{})) {
+            self.state.dispatch(.exit_mode);
+            ctx.consumeAndRedraw();
+            return true;
+        }
+        if (!key.mods.ctrl and !key.mods.alt) {
+            if (key.text) |text| {
+                self.state.dispatch(.{ .append_log_search_text = text });
+                ctx.consumeAndRedraw();
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    fn handleHelpKey(self: *RootWidget, ctx: *vxfw.EventContext, key: vaxis.Key) bool {
+        if (self.state.mode != .help) return false;
+
+        if (key.matches(vaxis.Key.escape, .{}) or
+            key.matches('c', .{ .ctrl = true }) or
+            matchesBinding(key, self.settings.keybindings.help) or
+            matchesBinding(key, self.settings.keybindings.quit))
+        {
+            self.state.dispatch(.exit_mode);
+            self.state.dispatch(.{ .set_status = "ready" });
+            ctx.consumeAndRedraw();
+            return true;
+        }
+
+        ctx.consumeAndRedraw();
+        return true;
     }
 
     fn handlePaletteKey(self: *RootWidget, ctx: *vxfw.EventContext, key: vaxis.Key) !bool {
@@ -506,6 +592,13 @@ const RootWidget = struct {
         return null;
     }
 
+    fn focusLabel(self: *RootWidget) []const u8 {
+        return switch (self.state.focused_pane) {
+            .tasks => "focus tasks",
+            .output => "focus output",
+        };
+    }
+
     fn runningJobCount(self: *RootWidget) usize {
         var count: usize = 0;
         for (self.jobs.items) |job| {
@@ -536,7 +629,8 @@ const RootWidget = struct {
     }
 
     fn drawTasks(self: *RootWidget, surface: vxfw.Surface, rect: layout.Rect) void {
-        widgets.drawBox(surface, rect, "Tasks");
+        const title = if (self.state.focused_pane == .tasks) "Tasks *" else "Tasks";
+        widgets.drawBox(surface, rect, title);
         if (rect.height <= 2 or rect.width <= 4) return;
 
         const max_rows = rect.height - 2;
@@ -563,8 +657,18 @@ const RootWidget = struct {
             self.drawPalette(surface, rect);
             return;
         }
+        if (self.state.mode == .help) {
+            self.drawHelp(surface, rect);
+            return;
+        }
 
-        widgets.drawBox(surface, rect, "Output");
+        const title = if (self.state.mode == .log_search)
+            "Output Search"
+        else if (self.state.focused_pane == .output)
+            "Output *"
+        else
+            "Output";
+        widgets.drawBox(surface, rect, title);
         if (rect.height <= 2 or rect.width <= 4) return;
 
         const logs = self.state.log.items();
@@ -572,12 +676,28 @@ const RootWidget = struct {
             widgets.writeTextClipped(surface, rect.y + 1, rect.x + 2, "No output yet", rect.width - 4);
             return;
         }
+        const visible_logs = self.state.visibleLogCount();
+        if (visible_logs == 0) {
+            widgets.writeTextClipped(surface, rect.y + 1, rect.x + 2, "No matching output", rect.width - 4);
+            return;
+        }
 
-        const max_rows = rect.height - 2;
-        const first = if (logs.len > max_rows) logs.len - max_rows else 0;
-        for (logs[first..], 0..) |line, index| {
-            const row: u16 = rect.y + 1 + @as(u16, @intCast(index));
+        const max_rows: usize = rect.height - 2;
+        const scroll = @min(self.state.output_scroll, visible_logs);
+        const first_visible = if (visible_logs > max_rows + scroll) visible_logs - max_rows - scroll else 0;
+        var visible_index: usize = 0;
+        var drawn: usize = 0;
+        for (logs, 0..) |line, log_index| {
+            if (!self.state.logVisible(log_index)) continue;
+            if (visible_index < first_visible) {
+                visible_index += 1;
+                continue;
+            }
+            if (drawn >= max_rows) break;
+            const row: u16 = rect.y + 1 + @as(u16, @intCast(drawn));
             widgets.writeTextClipped(surface, row, rect.x + 2, line.text, rect.width - 4);
+            visible_index += 1;
+            drawn += 1;
         }
     }
 
@@ -594,6 +714,32 @@ const RootWidget = struct {
         }
     }
 
+    fn drawHelp(_: *RootWidget, surface: vxfw.Surface, rect: layout.Rect) void {
+        widgets.drawBox(surface, rect, "Help");
+        if (rect.height <= 2 or rect.width <= 4) return;
+
+        const lines = [_][]const u8{
+            "Enter  run selected task",
+            "j/k or arrows  move task selection or scroll focused output",
+            "/  search tasks; when output is focused, search output",
+            "Tab  switch focus between task list and output",
+            ":  command palette",
+            "r  rerun last task",
+            "x  cancel newest running task",
+            "w  toggle file-watch rerun",
+            "t  show Git worktrees",
+            "g  refresh Git status",
+            "c  clear output",
+            "q or Ctrl+C  quit when no task is running",
+            "Esc, q, or ?  close help",
+        };
+        const max_rows: usize = rect.height - 2;
+        for (lines[0..@min(lines.len, max_rows)], 0..) |line, index| {
+            const row: u16 = rect.y + 1 + @as(u16, @intCast(index));
+            widgets.writeTextClipped(surface, row, rect.x + 2, line, rect.width - 4);
+        }
+    }
+
     fn drawStatus(self: *RootWidget, arena: std.mem.Allocator, surface: vxfw.Surface, rect: layout.Rect) void {
         widgets.drawBox(surface, rect, "Status");
         if (rect.height == 0 or rect.width <= 4) return;
@@ -606,18 +752,25 @@ const RootWidget = struct {
                 self.state.search_query.items,
                 self.state.visibleTaskCount(),
             }) catch "search"
+        else if (self.state.mode == .log_search)
+            std.fmt.allocPrint(arena, "output search: {s}  matches: {d}", .{
+                self.state.log_search_query.items,
+                self.state.visibleLogCount(),
+            }) catch "output search"
         else if (self.state.mode == .palette)
             "palette: Enter run command  Esc close"
+        else if (self.state.mode == .help)
+            "help: Esc close"
         else if (running_count > 0)
             std.fmt.allocPrint(arena, "running: {d}  {s}", .{ running_count, git_line }) catch "running"
         else if (self.watch_enabled)
             std.fmt.allocPrint(arena, "watch on  {s}", .{git_line}) catch "watch on"
         else
-            git_line;
+            std.fmt.allocPrint(arena, "focus: {s}  {s}", .{ @tagName(self.state.focused_pane), git_line }) catch git_line;
         const status_line = std.fmt.allocPrint(arena, "{s}  status: {s}", .{ mode_line, status }) catch mode_line;
         widgets.writeTextClippedStyled(surface, rect.y + 1, rect.x + 2, status_line, rect.width - 4, statusStyle(self.settings.theme));
         if (rect.height > 2) {
-            widgets.writeTextClipped(surface, rect.y + 2, rect.x + 2, "Enter run / find : cmds w watch t trees r rerun x stop c clear g git q quit", rect.width - 4);
+            widgets.writeTextClipped(surface, rect.y + 2, rect.x + 2, "Enter run / find : cmds Tab pane ? help w watch t trees r rerun x stop c clear g git q quit", rect.width - 4);
         }
     }
 };
@@ -790,6 +943,7 @@ fn matchesBinding(key: vaxis.Key, binding: []const u8) bool {
     if (std.mem.eql(u8, binding, "backspace")) return key.matches(vaxis.Key.backspace, .{});
     if (std.mem.eql(u8, binding, "up")) return key.matches(vaxis.Key.up, .{});
     if (std.mem.eql(u8, binding, "down")) return key.matches(vaxis.Key.down, .{});
+    if (std.mem.eql(u8, binding, "tab")) return key.matches(vaxis.Key.tab, .{});
     if (binding.len == 1) return key.matches(binding[0], .{});
     return false;
 }
@@ -823,6 +977,8 @@ test "key binding matcher handles named and ctrl keys" {
     try std.testing.expect(matchesBinding(.{ .codepoint = vaxis.Key.enter }, "enter"));
     try std.testing.expect(matchesBinding(.{ .codepoint = 'r', .mods = .{ .ctrl = true } }, "ctrl+r"));
     try std.testing.expect(matchesBinding(.{ .codepoint = ':' }, ":"));
+    try std.testing.expect(matchesBinding(.{ .codepoint = vaxis.Key.tab }, "tab"));
+    try std.testing.expect(matchesBinding(.{ .codepoint = '?' }, "?"));
     try std.testing.expect(!matchesBinding(.{ .codepoint = 'r' }, "ctrl+r"));
 }
 
