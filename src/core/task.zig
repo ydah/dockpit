@@ -8,6 +8,7 @@ pub const TaskSource = enum {
     npm,
     cargo,
     go,
+    docker,
 
     pub fn label(source: TaskSource) []const u8 {
         return switch (source) {
@@ -18,6 +19,7 @@ pub const TaskSource = enum {
             .npm => "npm",
             .cargo => "cargo",
             .go => "go",
+            .docker => "docker",
         };
     }
 };
@@ -49,6 +51,7 @@ pub const TaskSpec = struct {
 test "task source labels are stable" {
     try std.testing.expectEqualStrings("config", TaskSource.config.label());
     try std.testing.expectEqualStrings("zig", TaskSource.zig.label());
+    try std.testing.expectEqualStrings("docker", TaskSource.docker.label());
 }
 
 test "task command equality compares argv exactly" {

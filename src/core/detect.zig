@@ -24,6 +24,7 @@ pub fn detectTasks(
     try detectNpmTasks(allocator, io, project_root, &tasks);
     try detectCargoTasks(allocator, io, project_root, &tasks);
     try detectGoTasks(allocator, io, project_root, &tasks);
+    try detectDockerComposeTasks(allocator, io, project_root, &tasks);
 
     return tasks.toOwnedSlice(allocator);
 }
@@ -227,6 +228,53 @@ fn detectGoTasks(
     ));
 }
 
+fn detectDockerComposeTasks(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    project_root: []const u8,
+    tasks: *std.ArrayList(task.TaskSpec),
+) !void {
+    if (!try hasAnyFile(
+        allocator,
+        io,
+        project_root,
+        &.{ "compose.yaml", "compose.yml", "docker-compose.yml", "docker-compose.yaml" },
+    )) return;
+
+    try appendUniqueTask(allocator, tasks, try makeTask(
+        allocator,
+        "compose-up",
+        "docker compose up",
+        &.{ "docker", "compose", "up" },
+        project_root,
+        .docker,
+    ));
+    try appendUniqueTask(allocator, tasks, try makeTask(
+        allocator,
+        "compose-down",
+        "docker compose down",
+        &.{ "docker", "compose", "down" },
+        project_root,
+        .docker,
+    ));
+    try appendUniqueTask(allocator, tasks, try makeTask(
+        allocator,
+        "compose-ps",
+        "docker compose ps",
+        &.{ "docker", "compose", "ps" },
+        project_root,
+        .docker,
+    ));
+    try appendUniqueTask(allocator, tasks, try makeTask(
+        allocator,
+        "compose-logs",
+        "docker compose logs --tail=200",
+        &.{ "docker", "compose", "logs", "--tail=200" },
+        project_root,
+        .docker,
+    ));
+}
+
 fn appendUniqueTask(
     allocator: std.mem.Allocator,
     tasks: *std.ArrayList(task.TaskSpec),
@@ -282,6 +330,18 @@ fn hasFile(allocator: std.mem.Allocator, io: std.Io, project_root: []const u8, n
 
     std.Io.Dir.cwd().access(io, path, .{}) catch return false;
     return true;
+}
+
+fn hasAnyFile(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    project_root: []const u8,
+    names: []const []const u8,
+) !bool {
+    for (names) |name| {
+        if (try hasFile(allocator, io, project_root, name)) return true;
+    }
+    return false;
 }
 
 fn readFirstProjectFile(
@@ -495,6 +555,29 @@ test "detect go tasks" {
     try std.testing.expectEqualStrings("go-test", tasks[0].id);
     try std.testing.expectEqualStrings("go-build", tasks[1].id);
     try std.testing.expectEqualStrings("go-run", tasks[2].id);
+}
+
+test "detect docker compose tasks" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    const root = try std.Io.Dir.cwd().realPathFileAlloc(
+        std.testing.io,
+        "tests/fixtures/compose_project",
+        allocator,
+    );
+
+    const tasks = try detectTasks(allocator, std.testing.io, root, "missing.json");
+
+    try std.testing.expectEqual(@as(usize, 4), tasks.len);
+    try std.testing.expectEqualStrings("compose-up", tasks[0].id);
+    try std.testing.expectEqualStrings("docker", tasks[0].argv[0]);
+    try std.testing.expectEqualStrings("compose", tasks[0].argv[1]);
+    try std.testing.expectEqualStrings("compose-down", tasks[1].id);
+    try std.testing.expectEqualStrings("compose-ps", tasks[2].id);
+    try std.testing.expectEqualStrings("compose-logs", tasks[3].id);
+    try std.testing.expectEqual(task.TaskSource.docker, tasks[0].source);
 }
 
 test "detect keeps config task over duplicate zig id" {
