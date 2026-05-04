@@ -131,5 +131,3 @@ zig build test
 zig build
 zig build -Doptimize=ReleaseSafe
 ```
-
-The implementation plan lives in [docs/codex-tasks.md](docs/codex-tasks.md), and the product design lives in [docs/design.md](docs/design.md).
