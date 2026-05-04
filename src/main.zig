@@ -33,6 +33,7 @@ pub fn main(init: std.process.Init) !void {
         const result = try dockpit.runner.runTask(arena, init.io, item, init.environ_map);
         dockpit.history.appendRun(arena, init.io, project_root, item, result) catch {};
         try printRunResult(init.io, item, result);
+        try printFailures(init.io, arena, result);
         if (result.exitCode()) |code| {
             std.process.exit(code);
         }
@@ -133,5 +134,23 @@ fn printRunResult(io: std.Io, item: dockpit.task.TaskSpec, result: dockpit.runne
         .unknown => |code| try stdout.print("\nunknown {d} ({d} ms)\n", .{ code, result.elapsed_ms }),
     }
 
+    try stdout.flush();
+}
+
+fn printFailures(io: std.Io, allocator: std.mem.Allocator, result: dockpit.runner.RunResult) !void {
+    const code = result.exitCode() orelse 1;
+    if (code == 0) return;
+
+    const failures = try dockpit.failures.parse(allocator, result.stdout, result.stderr, 12);
+    if (failures.len == 0) return;
+
+    var buffer: [4096]u8 = undefined;
+    var stdout_file_writer: Io.File.Writer = .init(.stdout(), io, &buffer);
+    const stdout = &stdout_file_writer.interface;
+
+    try stdout.writeAll("\nfailures:\n");
+    for (failures) |failure| {
+        try stdout.print("- [{s}] {s}\n", .{ failure.kind.label(), failure.message });
+    }
     try stdout.flush();
 }

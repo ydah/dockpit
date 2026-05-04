@@ -3,6 +3,7 @@ const vaxis = @import("vaxis");
 const vxfw = vaxis.vxfw;
 
 const app_state = @import("../core/app_state.zig");
+const failures = @import("../core/failures.zig");
 const git = @import("../core/git.zig");
 const history = @import("../core/history.zig");
 const log_buffer = @import("../core/log_buffer.zig");
@@ -180,6 +181,7 @@ const RootWidget = struct {
         };
         try appendOutputLines(&self.state.log, .stdout, result.stdout, self.io);
         try appendOutputLines(&self.state.log, .stderr, result.stderr, self.io);
+        try self.appendFailureSummary(result);
 
         const status = if (job.cancel_requested.load(.acquire))
             "cancel requested"
@@ -202,6 +204,22 @@ const RootWidget = struct {
         }
         job.cancel_requested.store(true, .release);
         self.state.dispatch(.{ .set_status = "cancel requested" });
+    }
+
+    fn appendFailureSummary(self: *RootWidget, result: runner.RunResult) !void {
+        const code = result.exitCode() orelse 1;
+        if (code == 0) return;
+
+        const parsed = try failures.parse(self.allocator, result.stdout, result.stderr, 12);
+        defer failures.freeFailures(self.allocator, parsed);
+        if (parsed.len == 0) return;
+
+        try self.state.log.push(.system, "Failures", timestampMs(self.io));
+        for (parsed) |failure| {
+            const line = try std.fmt.allocPrint(self.allocator, "[{s}] {s}", .{ failure.kind.label(), failure.message });
+            defer self.allocator.free(line);
+            try self.state.log.push(.stderr, line, timestampMs(self.io));
+        }
     }
 
     fn refreshGit(self: *RootWidget) void {
