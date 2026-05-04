@@ -25,7 +25,7 @@ pub fn main(init: std.process.Init) !void {
 
     if (options.run_task_id) |task_id| {
         const project_root = try dockpit.project.discoverRoot(arena, init.io, options.project_dir orelse ".");
-        const tasks = try dockpit.detect.detectTasks(arena, init.io, project_root, options.config_path);
+        const tasks = try detectTasks(arena, init.io, project_root, options.config_path, options.strict_config);
         const item = findTask(tasks, task_id) orelse {
             std.debug.print("dockpit: unknown task id '{s}'\n", .{task_id});
             std.process.exit(1);
@@ -40,14 +40,18 @@ pub fn main(init: std.process.Init) !void {
         std.process.exit(1);
     } else if (options.print_tasks) {
         const project_root = try dockpit.project.discoverRoot(arena, init.io, options.project_dir orelse ".");
-        const tasks = try dockpit.detect.detectTasks(arena, init.io, project_root, options.config_path);
+        const tasks = try detectTasks(arena, init.io, project_root, options.config_path, options.strict_config);
         try printTasks(init.io, project_root, tasks);
         return;
     }
 
     const project_root = try dockpit.project.discoverRoot(arena, init.io, options.project_dir orelse ".");
-    const tasks = try dockpit.detect.detectTasks(arena, init.io, project_root, options.config_path);
-    const settings = try dockpit.config.loadSettings(arena, init.io, project_root, options.config_path);
+    const tasks = try detectTasks(arena, init.io, project_root, options.config_path, options.strict_config);
+    const settings = dockpit.config.loadSettings(arena, init.io, project_root, options.config_path) catch |err| settings: {
+        if (options.strict_config) return err;
+        std.debug.print("dockpit: ignoring invalid settings: {s}\n", .{@errorName(err)});
+        break :settings dockpit.config.Settings{};
+    };
     const git_summary = if (options.no_git) dockpit.git.GitSummary.none() else dockpit.git.loadSummary(arena, init.io, project_root);
     try dockpit.tui.run(arena, init.io, init.environ_map, project_root, tasks, git_summary, !options.no_git, settings);
 }
@@ -73,11 +77,25 @@ fn printHelp(io: std.Io) !void {
         \\  --print-tasks         Print detected tasks and exit.
         \\  --run <task-id>       Run a task without starting the TUI.
         \\  --no-git              Disable Git status discovery.
+        \\  --strict-config       Fail instead of falling back on invalid config.
         \\  --help                Show this help.
         \\  --version             Show version.
         \\
     );
     try stdout.flush();
+}
+
+fn detectTasks(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    project_root: []const u8,
+    config_path: []const u8,
+    strict_config: bool,
+) ![]dockpit.task.TaskSpec {
+    return if (strict_config)
+        dockpit.detect.detectTasksStrict(allocator, io, project_root, config_path)
+    else
+        dockpit.detect.detectTasks(allocator, io, project_root, config_path);
 }
 
 fn printTasks(io: std.Io, project_root: []const u8, tasks: []const dockpit.task.TaskSpec) !void {

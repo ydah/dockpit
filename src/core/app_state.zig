@@ -61,13 +61,19 @@ pub const AppState = struct {
         tasks: []const task.TaskSpec,
         git_summary: git.GitSummary,
     ) AppState {
-        return .{
+        var state = AppState{
             .allocator = allocator,
             .project_root = project_root,
             .tasks = tasks,
             .log = log_buffer.LogBuffer.init(allocator, 10_000),
             .git_summary = git_summary,
         };
+        for (tasks, 0..) |item, index| {
+            if (!item.default_task) continue;
+            state.selected_task = index;
+            break;
+        }
+        return state;
     }
 
     pub fn deinit(self: *AppState) void {
@@ -277,6 +283,17 @@ test "app state toggles focus and updates status" {
 
     try std.testing.expectEqual(Pane.output, state.focused_pane);
     try std.testing.expectEqualStrings("ready", state.status_message);
+}
+
+test "app state selects configured default task" {
+    const tasks = [_]task.TaskSpec{
+        .{ .id = "build", .label = "build", .argv = &.{"build"}, .cwd = ".", .source = .config },
+        .{ .id = "test", .label = "test", .argv = &.{"test"}, .cwd = ".", .source = .config, .default_task = true },
+    };
+    var state = AppState.init(std.testing.allocator, ".", &tasks, .{});
+    defer state.deinit();
+
+    try std.testing.expectEqual(@as(usize, 1), state.selected_task);
 }
 
 test "app state filters and scrolls output" {

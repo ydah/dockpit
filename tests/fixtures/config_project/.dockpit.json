@@ -3,6 +3,10 @@
     {
       "id": "dev",
       "label": "dev server",
+      "description": "Start the development server",
+      "group": "serve",
+      "default": true,
+      "watch": false,
       "cmd": ["npm", "run", "dev"],
       "cwd": ".",
       "env": {

@@ -159,6 +159,26 @@ fn parseTask(allocator: std.mem.Allocator, project_root: []const u8, value: std.
     else
         try allocator.alloc(task.EnvVar, 0);
 
+    const description = if (value.object.get("description")) |description_value|
+        try allocator.dupe(u8, try requiredString(description_value))
+    else
+        try allocator.dupe(u8, "");
+
+    const group = if (value.object.get("group")) |group_value|
+        try allocator.dupe(u8, try requiredString(group_value))
+    else
+        try allocator.dupe(u8, "");
+
+    const default_task = if (value.object.get("default")) |default_value|
+        try optionalBool(default_value)
+    else
+        false;
+
+    const watch = if (value.object.get("watch")) |watch_value|
+        try optionalBool(watch_value)
+    else
+        true;
+
     return .{
         .id = try allocator.dupe(u8, id),
         .label = label,
@@ -166,6 +186,10 @@ fn parseTask(allocator: std.mem.Allocator, project_root: []const u8, value: std.
         .cwd = cwd,
         .source = .config,
         .env = env,
+        .description = description,
+        .group = group,
+        .default_task = default_task,
+        .watch = watch,
     };
 }
 
@@ -192,6 +216,11 @@ fn requiredString(value: ?std.json.Value) ![]const u8 {
     const actual = value orelse return error.InvalidConfig;
     if (actual != .string) return error.InvalidConfig;
     return actual.string;
+}
+
+fn optionalBool(value: std.json.Value) !bool {
+    if (value != .bool) return error.InvalidConfig;
+    return value.bool;
 }
 
 fn resolveConfigPath(allocator: std.mem.Allocator, project_root: []const u8, config_path: []const u8) ![]u8 {
@@ -226,6 +255,10 @@ test "load config tasks from dockpit json" {
     try std.testing.expectEqualStrings(root, tasks[1].cwd);
     try std.testing.expectEqual(@as(usize, 1), tasks[0].env.len);
     try std.testing.expectEqualStrings("NODE_ENV", tasks[0].env[0].key);
+    try std.testing.expectEqualStrings("Start the development server", tasks[0].description);
+    try std.testing.expectEqualStrings("serve", tasks[0].group);
+    try std.testing.expect(tasks[0].default_task);
+    try std.testing.expect(!tasks[0].watch);
 }
 
 test "load settings from dockpit json" {

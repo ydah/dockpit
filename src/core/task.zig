@@ -36,6 +36,10 @@ pub const TaskSpec = struct {
     cwd: []const u8,
     source: TaskSource,
     env: []const EnvVar = &.{},
+    description: []const u8 = "",
+    group: []const u8 = "",
+    default_task: bool = false,
+    watch: bool = true,
 
     pub fn commandEquals(a: TaskSpec, b: TaskSpec) bool {
         if (a.argv.len != b.argv.len) return false;

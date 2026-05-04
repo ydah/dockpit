@@ -11,6 +11,7 @@ pub const Options = struct {
     print_tasks: bool = false,
     run_task_id: ?[]const u8 = null,
     no_git: bool = false,
+    strict_config: bool = false,
     help: bool = false,
     version: bool = false,
 };
@@ -30,6 +31,8 @@ pub fn parse(args: []const []const u8) CliError!Options {
             options.print_tasks = true;
         } else if (std.mem.eql(u8, arg, "--no-git")) {
             options.no_git = true;
+        } else if (std.mem.eql(u8, arg, "--strict-config")) {
+            options.strict_config = true;
         } else if (std.mem.eql(u8, arg, "--project-dir")) {
             i += 1;
             if (i >= args.len) return error.MissingValue;
@@ -58,6 +61,7 @@ test "parse default options" {
     try std.testing.expectEqualStrings(".dockpit.json", options.config_path);
     try std.testing.expect(!options.print_tasks);
     try std.testing.expect(!options.no_git);
+    try std.testing.expect(!options.strict_config);
 }
 
 test "parse supported flags and values" {
@@ -71,6 +75,7 @@ test "parse supported flags and values" {
         "--run",
         "zig-build",
         "--no-git",
+        "--strict-config",
     };
     const options = try parse(&args);
 
@@ -79,6 +84,7 @@ test "parse supported flags and values" {
     try std.testing.expect(options.print_tasks);
     try std.testing.expectEqualStrings("zig-build", options.run_task_id.?);
     try std.testing.expect(options.no_git);
+    try std.testing.expect(options.strict_config);
 }
 
 test "parse help and version" {

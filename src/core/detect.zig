@@ -9,22 +9,53 @@ pub fn detectTasks(
     project_root: []const u8,
     config_path: []const u8,
 ) ![]task.TaskSpec {
+    return detectTasksWithConfigMode(allocator, io, project_root, config_path, false);
+}
+
+pub fn detectTasksStrict(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    project_root: []const u8,
+    config_path: []const u8,
+) ![]task.TaskSpec {
+    return detectTasksWithConfigMode(allocator, io, project_root, config_path, true);
+}
+
+fn detectTasksWithConfigMode(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    project_root: []const u8,
+    config_path: []const u8,
+    strict_config: bool,
+) ![]task.TaskSpec {
     var tasks: std.ArrayList(task.TaskSpec) = .empty;
     errdefer tasks.deinit(allocator);
 
-    const config_tasks = try config.loadConfigTasks(allocator, io, project_root, config_path);
+    const config_tasks = config.loadConfigTasks(allocator, io, project_root, config_path) catch |err| {
+        if (strict_config) return err;
+        return detectAutoTasks(allocator, io, project_root, &tasks);
+    };
     defer allocator.free(config_tasks);
     for (config_tasks) |config_task| {
         try tasks.append(allocator, config_task);
     }
 
-    try detectZigTasks(allocator, io, project_root, &tasks);
-    try detectMakeTasks(allocator, io, project_root, &tasks);
-    try detectJustTasks(allocator, io, project_root, &tasks);
-    try detectNpmTasks(allocator, io, project_root, &tasks);
-    try detectCargoTasks(allocator, io, project_root, &tasks);
-    try detectGoTasks(allocator, io, project_root, &tasks);
-    try detectDockerComposeTasks(allocator, io, project_root, &tasks);
+    return detectAutoTasks(allocator, io, project_root, &tasks);
+}
+
+fn detectAutoTasks(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    project_root: []const u8,
+    tasks: *std.ArrayList(task.TaskSpec),
+) ![]task.TaskSpec {
+    try detectZigTasks(allocator, io, project_root, tasks);
+    try detectMakeTasks(allocator, io, project_root, tasks);
+    try detectJustTasks(allocator, io, project_root, tasks);
+    try detectNpmTasks(allocator, io, project_root, tasks);
+    try detectCargoTasks(allocator, io, project_root, tasks);
+    try detectGoTasks(allocator, io, project_root, tasks);
+    try detectDockerComposeTasks(allocator, io, project_root, tasks);
 
     return tasks.toOwnedSlice(allocator);
 }
@@ -334,6 +365,8 @@ fn makeTask(
         .cwd = try allocator.dupe(u8, cwd),
         .source = source,
         .env = try allocator.alloc(task.EnvVar, 0),
+        .description = try allocator.dupe(u8, ""),
+        .group = try allocator.dupe(u8, ""),
     };
 }
 
@@ -344,6 +377,8 @@ fn discardTask(allocator: std.mem.Allocator, item: task.TaskSpec) void {
     allocator.free(item.argv);
     allocator.free(item.cwd);
     allocator.free(item.env);
+    allocator.free(item.description);
+    allocator.free(item.group);
 }
 
 fn hasFile(allocator: std.mem.Allocator, io: std.Io, project_root: []const u8, name: []const u8) !bool {
@@ -711,4 +746,37 @@ test "detect keeps config task over duplicate zig id" {
     try std.testing.expectEqualStrings("custom build", tasks[0].label);
     try std.testing.expectEqual(task.TaskSource.config, tasks[0].source);
     try std.testing.expectEqualStrings("zig-test", tasks[1].id);
+}
+
+test "detect falls back on invalid config by default" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    const root = try std.Io.Dir.cwd().realPathFileAlloc(
+        std.testing.io,
+        "tests/fixtures/config_project",
+        allocator,
+    );
+
+    const tasks = try detectTasks(allocator, std.testing.io, root, "broken.json");
+
+    try std.testing.expectEqual(@as(usize, 0), tasks.len);
+}
+
+test "detect strict config returns invalid config errors" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    const root = try std.Io.Dir.cwd().realPathFileAlloc(
+        std.testing.io,
+        "tests/fixtures/config_project",
+        allocator,
+    );
+
+    try std.testing.expectError(
+        error.UnexpectedEndOfInput,
+        detectTasksStrict(allocator, std.testing.io, root, "broken.json"),
+    );
 }
