@@ -2,7 +2,10 @@ const std = @import("std");
 const vaxis = @import("vaxis");
 const vxfw = vaxis.vxfw;
 
+const app_state = @import("../core/app_state.zig");
 const task = @import("../core/task.zig");
+const layout = @import("layout.zig");
+const widgets = @import("widgets.zig");
 
 pub fn run(
     allocator: std.mem.Allocator,
@@ -15,17 +18,18 @@ pub fn run(
     var app = try vxfw.App.init(io, allocator, env_map, &tty_buffer);
     defer app.deinit();
 
+    var state = app_state.AppState.init(allocator, project_root, tasks, .{});
+    defer state.deinit();
+
     var root = RootWidget{
-        .project_root = project_root,
-        .task_count = try std.fmt.allocPrint(allocator, "{d}", .{tasks.len}),
+        .state = &state,
     };
 
     try app.run(root.widget(), .{});
 }
 
 const RootWidget = struct {
-    project_root: []const u8,
-    task_count: []const u8,
+    state: *app_state.AppState,
 
     fn widget(self: *RootWidget) vxfw.Widget {
         return .{
@@ -41,12 +45,28 @@ const RootWidget = struct {
     }
 
     fn handleEvent(self: *RootWidget, ctx: *vxfw.EventContext, event: vxfw.Event) !void {
-        _ = self;
         switch (event) {
             .key_press => |key| {
                 if (key.matches('q', .{}) or key.matches('c', .{ .ctrl = true })) {
                     ctx.quit = true;
                     ctx.consume_event = true;
+                    return;
+                }
+                if (key.matches('j', .{}) or key.matches(vaxis.Key.down, .{})) {
+                    self.state.dispatch(.select_next);
+                    ctx.consumeAndRedraw();
+                    return;
+                }
+                if (key.matches('k', .{}) or key.matches(vaxis.Key.up, .{})) {
+                    self.state.dispatch(.select_previous);
+                    ctx.consumeAndRedraw();
+                    return;
+                }
+                if (key.matches(vaxis.Key.enter, .{})) {
+                    if (self.state.selectedTask()) |selected| {
+                        self.state.dispatch(.{ .set_status = selected.id });
+                    }
+                    ctx.consumeAndRedraw();
                 }
             },
             else => {},
@@ -66,27 +86,55 @@ const RootWidget = struct {
             .height = height,
         });
 
-        writeLine(surface, 1, 2, "dockpit");
-        writeLine(surface, 3, 2, "project: ");
-        writeLine(surface, 3, 11, self.project_root);
-        writeLine(surface, 4, 2, "detected tasks: ");
-        writeLine(surface, 4, 18, self.task_count);
-        writeLine(surface, 6, 2, "q quit");
+        const panes = layout.compute(width, height);
+        self.drawTasks(surface, panes.tasks);
+        self.drawOutput(surface, panes.output);
+        self.drawStatus(surface, panes.status);
 
         return surface;
     }
-};
 
-fn writeLine(surface: vxfw.Surface, row: u16, col: u16, text: []const u8) void {
-    var current_col = col;
-    for (text, 0..) |_, index| {
-        if (current_col >= surface.size.width) return;
-        surface.writeCell(current_col, row, .{
-            .char = .{
-                .grapheme = text[index .. index + 1],
-                .width = 1,
-            },
-        });
-        current_col += 1;
+    fn drawTasks(self: *RootWidget, surface: vxfw.Surface, rect: layout.Rect) void {
+        widgets.drawBox(surface, rect, "Tasks");
+        if (rect.height <= 2 or rect.width <= 4) return;
+
+        const max_rows = rect.height - 2;
+        const max_width = rect.width - 4;
+        for (self.state.tasks[0..@min(self.state.tasks.len, max_rows)], 0..) |item, index| {
+            const row: u16 = rect.y + 1 + @as(u16, @intCast(index));
+            const marker = if (index == self.state.selected_task) ">" else " ";
+            widgets.writeText(surface, row, rect.x + 2, marker);
+            widgets.writeTextClipped(surface, row, rect.x + 4, item.label, max_width);
+        }
     }
-}
+
+    fn drawOutput(self: *RootWidget, surface: vxfw.Surface, rect: layout.Rect) void {
+        widgets.drawBox(surface, rect, "Output");
+        if (rect.height <= 2 or rect.width <= 4) return;
+
+        const logs = self.state.log.items();
+        if (logs.len == 0) {
+            widgets.writeTextClipped(surface, rect.y + 1, rect.x + 2, "No output yet", rect.width - 4);
+            return;
+        }
+
+        const max_rows = rect.height - 2;
+        const first = if (logs.len > max_rows) logs.len - max_rows else 0;
+        for (logs[first..], 0..) |line, index| {
+            const row: u16 = rect.y + 1 + @as(u16, @intCast(index));
+            widgets.writeTextClipped(surface, row, rect.x + 2, line.text, rect.width - 4);
+        }
+    }
+
+    fn drawStatus(self: *RootWidget, surface: vxfw.Surface, rect: layout.Rect) void {
+        widgets.drawBox(surface, rect, "Status");
+        if (rect.height == 0 or rect.width <= 4) return;
+
+        const status = if (self.state.status_message.len > 0) self.state.status_message else "ready";
+        widgets.writeTextClipped(surface, rect.y + 1, rect.x + 2, self.state.project_root, rect.width - 4);
+        if (rect.height > 2) {
+            widgets.writeTextClipped(surface, rect.y + 2, rect.x + 2, "Enter select  j/k move  q quit  status: ", rect.width - 4);
+            widgets.writeTextClipped(surface, rect.y + 2, rect.x + 43, status, rect.width - 4);
+        }
+    }
+};
