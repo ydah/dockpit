@@ -3,6 +3,7 @@ const vaxis = @import("vaxis");
 const vxfw = vaxis.vxfw;
 
 const app_state = @import("../core/app_state.zig");
+const git = @import("../core/git.zig");
 const log_buffer = @import("../core/log_buffer.zig");
 const runner = @import("../core/runner.zig");
 const task = @import("../core/task.zig");
@@ -15,18 +16,21 @@ pub fn run(
     env_map: *std.process.Environ.Map,
     project_root: []const u8,
     tasks: []const task.TaskSpec,
+    git_summary: git.GitSummary,
+    git_enabled: bool,
 ) !void {
     var tty_buffer: [4096]u8 = undefined;
     var app = try vxfw.App.init(io, allocator, env_map, &tty_buffer);
     defer app.deinit();
 
-    var state = app_state.AppState.init(allocator, project_root, tasks, .{});
+    var state = app_state.AppState.init(allocator, project_root, tasks, git_summary);
     defer state.deinit();
 
     var root = RootWidget{
         .allocator = allocator,
         .io = io,
         .env_map = env_map,
+        .git_enabled = git_enabled,
         .state = &state,
     };
 
@@ -37,6 +41,7 @@ const RootWidget = struct {
     allocator: std.mem.Allocator,
     io: std.Io,
     env_map: *std.process.Environ.Map,
+    git_enabled: bool,
     state: *app_state.AppState,
     running: ?*RunningJob = null,
 
@@ -96,6 +101,11 @@ const RootWidget = struct {
                 }
                 if (key.matches('x', .{})) {
                     self.requestCancel();
+                    ctx.consumeAndRedraw();
+                    return;
+                }
+                if (key.matches('g', .{})) {
+                    self.refreshGit();
                     ctx.consumeAndRedraw();
                     return;
                 }
@@ -171,6 +181,7 @@ const RootWidget = struct {
         else
             "signal";
         self.state.dispatch(.{ .set_status = status });
+        self.refreshGit();
     }
 
     fn requestCancel(self: *RootWidget) void {
@@ -184,6 +195,14 @@ const RootWidget = struct {
         }
         job.cancel_requested.store(true, .release);
         self.state.dispatch(.{ .set_status = "cancel requested" });
+    }
+
+    fn refreshGit(self: *RootWidget) void {
+        if (!self.git_enabled) {
+            self.state.dispatch(.{ .set_status = "git disabled" });
+            return;
+        }
+        self.state.dispatch(.{ .set_git = git.loadSummary(self.allocator, self.io, self.state.project_root) });
     }
 
     fn lastTask(self: *RootWidget) ?task.TaskSpec {
@@ -252,10 +271,11 @@ const RootWidget = struct {
         if (rect.height == 0 or rect.width <= 4) return;
 
         const status = if (self.state.status_message.len > 0) self.state.status_message else "ready";
-        widgets.writeTextClipped(surface, rect.y + 1, rect.x + 2, self.state.project_root, rect.width - 4);
+        const git_line = formatGitLine(self.allocator, self.git_enabled, self.state.git_summary) catch "git: error";
+        widgets.writeTextClipped(surface, rect.y + 1, rect.x + 2, git_line, rect.width - 4);
         if (rect.height > 2) {
-            widgets.writeTextClipped(surface, rect.y + 2, rect.x + 2, "Enter run  r rerun  x cancel  c clear  j/k move  q quit", rect.width - 4);
-            widgets.writeTextClipped(surface, rect.y + 2, rect.x + 58, status, rect.width - 4);
+            widgets.writeTextClipped(surface, rect.y + 2, rect.x + 2, "Enter run  r rerun  x cancel  c clear  g git  j/k move  q quit", rect.width - 4);
+            widgets.writeTextClipped(surface, rect.y + 2, rect.x + 68, status, rect.width - 4);
         }
     }
 };
@@ -312,4 +332,15 @@ fn appendOutputLines(
 
 fn timestampMs(io: std.Io) u64 {
     return @intCast(std.Io.Timestamp.now(io, .real).toMilliseconds());
+}
+
+fn formatGitLine(allocator: std.mem.Allocator, enabled: bool, summary: git.GitSummary) ![]const u8 {
+    if (!enabled) return "git: disabled";
+    if (!summary.in_repo) return "git: none";
+
+    return std.fmt.allocPrint(
+        allocator,
+        "branch: {s}  modified: {d}  added: {d}  deleted: {d}  untracked: {d}",
+        .{ summary.branch, summary.modified, summary.added, summary.deleted, summary.untracked },
+    );
 }

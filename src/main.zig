@@ -43,7 +43,8 @@ pub fn main(init: std.process.Init) !void {
 
     const project_root = try dockpit.project.discoverRoot(arena, init.io, options.project_dir orelse ".");
     const tasks = try dockpit.detect.detectTasks(arena, init.io, project_root, options.config_path);
-    try dockpit.tui.run(arena, init.io, init.environ_map, project_root, tasks);
+    const git_summary = if (options.no_git) dockpit.git.GitSummary.none() else dockpit.git.loadSummary(arena, init.io, project_root);
+    try dockpit.tui.run(arena, init.io, init.environ_map, project_root, tasks, git_summary, !options.no_git);
 }
 
 fn printVersion(io: std.Io) !void {
