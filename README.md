@@ -8,6 +8,20 @@ The MVP discovers common project tasks, runs them without shell-string execution
 
 This project targets Zig 0.16.0.
 
+## Usage
+
+Print detected tasks without starting the TUI:
+
+```sh
+zig build run -- --print-tasks
+```
+
+Use a different project directory:
+
+```sh
+zig build run -- --project-dir ../my-project --print-tasks
+```
+
 ```sh
 zig fmt .
 zig build test
