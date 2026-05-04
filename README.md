@@ -22,6 +22,12 @@ Use a different project directory:
 zig build run -- --project-dir ../my-project --print-tasks
 ```
 
+Run a task without starting the TUI:
+
+```sh
+zig build run -- --run zig-build
+```
+
 ```sh
 zig fmt .
 zig build test

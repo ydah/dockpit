@@ -1,0 +1,9 @@
+{
+  "tasks": [
+    {
+      "id": "hello",
+      "label": "hello",
+      "cmd": ["/bin/echo", "hello from dockpit"]
+    }
+  ]
+}

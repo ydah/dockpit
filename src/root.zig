@@ -5,6 +5,7 @@ pub const log_buffer = @import("core/log_buffer.zig");
 pub const project = @import("core/project.zig");
 pub const config = @import("core/config.zig");
 pub const detect = @import("core/detect.zig");
+pub const runner = @import("core/runner.zig");
 
 test {
     _ = version;
@@ -14,4 +15,5 @@ test {
     _ = project;
     _ = config;
     _ = detect;
+    _ = runner;
 }
