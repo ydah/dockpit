@@ -11,6 +11,10 @@ const markers = [_][]const u8{
     "package.json",
     "Cargo.toml",
     "go.mod",
+    "compose.yaml",
+    "compose.yml",
+    "docker-compose.yml",
+    "docker-compose.yaml",
 };
 
 pub fn discoverRoot(allocator: std.mem.Allocator, io: std.Io, start_dir: []const u8) ![]u8 {
@@ -87,12 +91,15 @@ test "discover root falls back to starting directory" {
     _ = std.base64.url_safe.Encoder.encode(&suffix, &random_bytes);
 
     var path_buffer: [std.fs.max_path_bytes]u8 = undefined;
-    const expected = try std.fmt.bufPrint(&path_buffer, "/private/tmp/dockpit-no-marker-{s}", .{suffix});
+    const temp_path = try std.fmt.bufPrint(&path_buffer, "/tmp/dockpit-no-marker-{s}", .{suffix});
 
-    try std.Io.Dir.createDirAbsolute(std.testing.io, expected, .default_dir);
-    defer std.Io.Dir.cwd().deleteTree(std.testing.io, expected) catch {};
+    try std.Io.Dir.createDirAbsolute(std.testing.io, temp_path, .default_dir);
+    defer std.Io.Dir.cwd().deleteTree(std.testing.io, temp_path) catch {};
 
-    const root = try discoverRoot(allocator, std.testing.io, expected);
+    const expected = try std.Io.Dir.cwd().realPathFileAlloc(std.testing.io, temp_path, allocator);
+    defer allocator.free(expected);
+
+    const root = try discoverRoot(allocator, std.testing.io, temp_path);
     defer allocator.free(root);
 
     try std.testing.expectEqualStrings(expected, root);
