@@ -1,5 +1,9 @@
 {
   "theme": "high-contrast",
+  "watch": {
+    "debounce_ms": 250,
+    "ignore": ["tmp", "dist"]
+  },
   "keybindings": {
     "rerun": "ctrl+r",
     "palette": "p"

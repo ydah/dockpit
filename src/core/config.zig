@@ -4,6 +4,12 @@ const task = @import("task.zig");
 
 pub const ConfigError = error{
     InvalidConfig,
+    EmptyTaskId,
+    EmptyCommandArg,
+    DuplicateTaskId,
+    DuplicateDefaultTask,
+    InvalidCwd,
+    DuplicateKeyBinding,
 };
 
 pub const Theme = enum {
@@ -43,6 +49,12 @@ pub const KeyBindings = struct {
 pub const Settings = struct {
     theme: Theme = .default,
     keybindings: KeyBindings = .{},
+    watch: WatchSettings = .{},
+};
+
+pub const WatchSettings = struct {
+    debounce_ms: u64 = 1000,
+    ignore: []const []const u8 = &.{},
 };
 
 pub fn loadSettings(
@@ -72,6 +84,10 @@ pub fn loadSettings(
     }
     if (root.object.get("keybindings")) |keybindings_value| {
         settings.keybindings = try parseKeybindings(allocator, keybindings_value, settings.keybindings);
+        try validateKeybindings(settings.keybindings);
+    }
+    if (root.object.get("watch")) |watch_value| {
+        settings.watch = try parseWatchSettings(allocator, watch_value);
     }
     return settings;
 }
@@ -101,10 +117,22 @@ pub fn loadConfigTasks(
     if (tasks_value != .array) return error.InvalidConfig;
 
     var tasks: std.ArrayList(task.TaskSpec) = .empty;
-    errdefer tasks.deinit(allocator);
+    errdefer {
+        for (tasks.items) |item| item.deinit(allocator);
+        tasks.deinit(allocator);
+    }
+    var has_default = false;
 
     for (tasks_value.array.items) |task_value| {
-        try tasks.append(allocator, try parseTask(allocator, project_root, task_value));
+        const item = try parseTask(allocator, io, project_root, task_value);
+        validateTask(tasks.items, item, &has_default) catch |err| {
+            item.deinit(allocator);
+            return err;
+        };
+        tasks.append(allocator, item) catch |err| {
+            item.deinit(allocator);
+            return err;
+        };
     }
 
     return tasks.toOwnedSlice(allocator);
@@ -131,17 +159,44 @@ fn parseKeybindings(allocator: std.mem.Allocator, value: std.json.Value, default
     return bindings;
 }
 
-fn parseTask(allocator: std.mem.Allocator, project_root: []const u8, value: std.json.Value) !task.TaskSpec {
+fn parseWatchSettings(allocator: std.mem.Allocator, value: std.json.Value) !WatchSettings {
+    if (value != .object) return error.InvalidConfig;
+
+    var settings = WatchSettings{};
+    if (value.object.get("debounce_ms")) |debounce_value| {
+        settings.debounce_ms = try positiveInteger(debounce_value);
+    }
+    if (value.object.get("ignore")) |ignore_value| {
+        if (ignore_value != .array) return error.InvalidConfig;
+        const ignore = try allocator.alloc([]const u8, ignore_value.array.items.len);
+        errdefer allocator.free(ignore);
+        for (ignore_value.array.items, 0..) |entry, index| {
+            const pattern = try requiredString(entry);
+            if (pattern.len == 0) return error.InvalidConfig;
+            ignore[index] = try allocator.dupe(u8, pattern);
+        }
+        settings.ignore = ignore;
+    }
+    return settings;
+}
+
+fn parseTask(allocator: std.mem.Allocator, io: std.Io, project_root: []const u8, value: std.json.Value) !task.TaskSpec {
     if (value != .object) return error.InvalidConfig;
 
     const id = try requiredString(value.object.get("id"));
+    if (id.len == 0) return error.EmptyTaskId;
     const cmd = value.object.get("cmd") orelse return error.InvalidConfig;
     if (cmd != .array or cmd.array.items.len == 0) return error.InvalidConfig;
 
     const argv = try allocator.alloc([]const u8, cmd.array.items.len);
-    errdefer allocator.free(argv);
+    @memset(argv, "");
+    errdefer {
+        for (argv) |arg| if (arg.len > 0) allocator.free(arg);
+        allocator.free(argv);
+    }
     for (cmd.array.items, 0..) |arg_value, index| {
         const arg = try requiredString(arg_value);
+        if (arg.len == 0) return error.EmptyCommandArg;
         argv[index] = try allocator.dupe(u8, arg);
     }
 
@@ -154,6 +209,8 @@ fn parseTask(allocator: std.mem.Allocator, project_root: []const u8, value: std.
         try resolveCwd(allocator, project_root, try requiredString(cwd_value))
     else
         try allocator.dupe(u8, project_root);
+    errdefer allocator.free(cwd);
+    try validateCwd(io, cwd);
 
     const env = if (value.object.get("env")) |env_value|
         try parseEnv(allocator, env_value)
@@ -213,6 +270,33 @@ fn parseEnv(allocator: std.mem.Allocator, value: std.json.Value) ![]task.EnvVar 
     return env;
 }
 
+fn validateTask(existing: []const task.TaskSpec, item: task.TaskSpec, has_default: *bool) !void {
+    for (existing) |previous| {
+        if (std.mem.eql(u8, previous.id, item.id)) return error.DuplicateTaskId;
+    }
+    if (!item.default_task) return;
+    if (has_default.*) return error.DuplicateDefaultTask;
+    has_default.* = true;
+}
+
+fn validateKeybindings(bindings: KeyBindings) !void {
+    const info = @typeInfo(KeyBindings).@"struct";
+    inline for (info.fields, 0..) |left, left_index| {
+        const left_value = @field(bindings, left.name);
+        if (left_value.len == 0) return error.InvalidConfig;
+        inline for (info.fields, 0..) |right, right_index| {
+            if (right_index <= left_index) continue;
+            const right_value = @field(bindings, right.name);
+            if (std.mem.eql(u8, left_value, right_value)) return error.DuplicateKeyBinding;
+        }
+    }
+}
+
+fn validateCwd(io: std.Io, cwd: []const u8) !void {
+    var dir = std.Io.Dir.cwd().openDir(io, cwd, .{}) catch return error.InvalidCwd;
+    dir.close(io);
+}
+
 fn requiredString(value: ?std.json.Value) ![]const u8 {
     const actual = value orelse return error.InvalidConfig;
     if (actual != .string) return error.InvalidConfig;
@@ -222,6 +306,12 @@ fn requiredString(value: ?std.json.Value) ![]const u8 {
 fn optionalBool(value: std.json.Value) !bool {
     if (value != .bool) return error.InvalidConfig;
     return value.bool;
+}
+
+fn positiveInteger(value: std.json.Value) !u64 {
+    if (value != .integer) return error.InvalidConfig;
+    if (value.integer <= 0) return error.InvalidConfig;
+    return @intCast(value.integer);
 }
 
 fn resolveConfigPath(allocator: std.mem.Allocator, project_root: []const u8, config_path: []const u8) ![]u8 {
@@ -278,6 +368,9 @@ test "load settings from dockpit json" {
     try std.testing.expectEqual(Theme.high_contrast, settings.theme);
     try std.testing.expectEqualStrings("ctrl+r", settings.keybindings.rerun);
     try std.testing.expectEqualStrings("enter", settings.keybindings.run);
+    try std.testing.expectEqual(@as(u64, 250), settings.watch.debounce_ms);
+    try std.testing.expectEqual(@as(usize, 2), settings.watch.ignore.len);
+    try std.testing.expectEqualStrings("tmp", settings.watch.ignore[0]);
 }
 
 test "missing config returns empty task list" {
@@ -325,5 +418,73 @@ test "invalid config shape returns an error" {
     try std.testing.expectError(
         error.InvalidConfig,
         loadConfigTasks(allocator, std.testing.io, root, "invalid.json"),
+    );
+}
+
+test "duplicate task ids return an error" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    const root = try std.Io.Dir.cwd().realPathFileAlloc(
+        std.testing.io,
+        "tests/fixtures/config_project",
+        allocator,
+    );
+
+    try std.testing.expectError(
+        error.DuplicateTaskId,
+        loadConfigTasks(allocator, std.testing.io, root, "duplicate_task.json"),
+    );
+}
+
+test "duplicate default tasks return an error" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    const root = try std.Io.Dir.cwd().realPathFileAlloc(
+        std.testing.io,
+        "tests/fixtures/config_project",
+        allocator,
+    );
+
+    try std.testing.expectError(
+        error.DuplicateDefaultTask,
+        loadConfigTasks(allocator, std.testing.io, root, "duplicate_default.json"),
+    );
+}
+
+test "invalid cwd returns an error" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    const root = try std.Io.Dir.cwd().realPathFileAlloc(
+        std.testing.io,
+        "tests/fixtures/config_project",
+        allocator,
+    );
+
+    try std.testing.expectError(
+        error.InvalidCwd,
+        loadConfigTasks(allocator, std.testing.io, root, "invalid_cwd.json"),
+    );
+}
+
+test "duplicate keybindings return an error" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    const root = try std.Io.Dir.cwd().realPathFileAlloc(
+        std.testing.io,
+        "tests/fixtures/config_project",
+        allocator,
+    );
+
+    try std.testing.expectError(
+        error.DuplicateKeyBinding,
+        loadSettings(allocator, std.testing.io, root, "duplicate_keybindings.json"),
     );
 }

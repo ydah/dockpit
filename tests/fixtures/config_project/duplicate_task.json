@@ -1,0 +1,12 @@
+{
+  "tasks": [
+    {
+      "id": "test",
+      "cmd": ["zig", "build", "test"]
+    },
+    {
+      "id": "test",
+      "cmd": ["zig", "build"]
+    }
+  ]
+}

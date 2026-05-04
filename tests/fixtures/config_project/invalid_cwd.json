@@ -1,0 +1,9 @@
+{
+  "tasks": [
+    {
+      "id": "missing-cwd",
+      "cwd": "missing",
+      "cmd": ["zig", "build"]
+    }
+  ]
+}

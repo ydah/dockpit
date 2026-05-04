@@ -68,6 +68,21 @@ pub const TaskSpec = struct {
 
         return true;
     }
+
+    pub fn deinit(self: TaskSpec, allocator: std.mem.Allocator) void {
+        allocator.free(self.id);
+        allocator.free(self.label);
+        for (self.argv) |arg| allocator.free(arg);
+        allocator.free(self.argv);
+        allocator.free(self.cwd);
+        for (self.env) |entry| {
+            allocator.free(entry.key);
+            allocator.free(entry.value);
+        }
+        allocator.free(self.env);
+        allocator.free(self.description);
+        allocator.free(self.group);
+    }
 };
 
 test "task source labels are stable" {

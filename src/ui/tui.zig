@@ -578,21 +578,21 @@ const RootWidget = struct {
             return;
         }
 
-        self.watch_snapshot = try watch.capture(self.allocator, self.io, self.state.project_root);
+        self.watch_snapshot = try self.captureWatchSnapshot();
         self.last_watch_ms = timestampMs(self.io);
         self.watch_enabled = true;
         self.state.dispatch(.{ .set_status = "watch on" });
-        try ctx.tick(1000, self.widget());
+        try ctx.tick(@intCast(self.settings.watch.debounce_ms), self.widget());
     }
 
     fn pollWatch(self: *RootWidget, ctx: *vxfw.EventContext) !void {
         if (!self.watch_enabled) return;
 
         const now = timestampMs(self.io);
-        if (now < self.last_watch_ms + 1000) return;
+        if (now < self.last_watch_ms + self.settings.watch.debounce_ms) return;
         self.last_watch_ms = now;
 
-        var current = watch.capture(self.allocator, self.io, self.state.project_root) catch |err| {
+        var current = self.captureWatchSnapshot() catch |err| {
             self.state.dispatch(.{ .set_status = @errorName(err) });
             return;
         };
@@ -620,8 +620,16 @@ const RootWidget = struct {
             self.state.dispatch(.{ .set_status = "watch changed" });
             return;
         };
+        if (!item.watch) {
+            self.state.dispatch(.{ .set_status = "watch disabled for task" });
+            return;
+        }
         self.state.dispatch(.{ .set_status = "watch rerun" });
         try self.startTask(ctx, item);
+    }
+
+    fn captureWatchSnapshot(self: *RootWidget) !watch.Snapshot {
+        return watch.captureWithIgnore(self.allocator, self.io, self.state.project_root, self.settings.watch.ignore);
     }
 
     fn finishCompletedJobs(self: *RootWidget) !void {

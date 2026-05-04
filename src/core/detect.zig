@@ -663,14 +663,7 @@ fn makeTask(
 }
 
 fn discardTask(allocator: std.mem.Allocator, item: task.TaskSpec) void {
-    allocator.free(item.id);
-    allocator.free(item.label);
-    for (item.argv) |arg| allocator.free(arg);
-    allocator.free(item.argv);
-    allocator.free(item.cwd);
-    allocator.free(item.env);
-    allocator.free(item.description);
-    allocator.free(item.group);
+    item.deinit(allocator);
 }
 
 fn hasFile(allocator: std.mem.Allocator, io: std.Io, project_root: []const u8, name: []const u8) !bool {
