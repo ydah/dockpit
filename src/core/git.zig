@@ -7,9 +7,32 @@ pub const GitSummary = struct {
     added: usize = 0,
     deleted: usize = 0,
     untracked: usize = 0,
+    worktrees: usize = 0,
 
     pub fn none() GitSummary {
         return .{};
+    }
+};
+
+pub const Worktree = struct {
+    path: []const u8,
+    head: []const u8 = "",
+    branch: []const u8 = "",
+    detached: bool = false,
+};
+
+pub const WorktreeList = struct {
+    allocator: std.mem.Allocator,
+    items: []Worktree,
+
+    pub fn deinit(self: *WorktreeList) void {
+        for (self.items) |item| {
+            self.allocator.free(item.path);
+            self.allocator.free(item.head);
+            self.allocator.free(item.branch);
+        }
+        if (self.items.len > 0) self.allocator.free(self.items);
+        self.* = undefined;
     }
 };
 
@@ -33,7 +56,68 @@ pub fn loadSummary(allocator: std.mem.Allocator, io: std.Io, project_root: []con
     var summary = parsePorcelain(status_result.stdout);
     summary.in_repo = true;
     summary.branch = allocator.dupe(u8, std.mem.trim(u8, branch_result.stdout, " \t\r\n")) catch "unknown";
+    var worktrees = loadWorktrees(allocator, io, project_root);
+    defer worktrees.deinit();
+    summary.worktrees = worktrees.items.len;
     return summary;
+}
+
+pub fn loadWorktrees(allocator: std.mem.Allocator, io: std.Io, project_root: []const u8) WorktreeList {
+    const result = std.process.run(allocator, io, .{
+        .argv = &.{ "git", "worktree", "list", "--porcelain" },
+        .cwd = .{ .path = project_root },
+        .stdout_limit = .limited(1024 * 1024),
+        .stderr_limit = .limited(1024),
+    }) catch return emptyWorktrees(allocator);
+    if (!isSuccess(result.term)) return emptyWorktrees(allocator);
+
+    const items = parseWorktreePorcelain(allocator, result.stdout) catch return emptyWorktrees(allocator);
+    return .{ .allocator = allocator, .items = items };
+}
+
+pub fn parseWorktreePorcelain(allocator: std.mem.Allocator, contents: []const u8) ![]Worktree {
+    var items: std.ArrayList(Worktree) = .empty;
+    errdefer {
+        for (items.items) |item| freeWorktree(allocator, item);
+        items.deinit(allocator);
+    }
+
+    var current: ?Worktree = null;
+    var lines = std.mem.splitScalar(u8, contents, '\n');
+    while (lines.next()) |raw_line| {
+        const line = std.mem.trim(u8, raw_line, "\r");
+        if (line.len == 0) {
+            if (current) |item| {
+                try items.append(allocator, item);
+                current = null;
+            }
+            continue;
+        }
+
+        if (std.mem.startsWith(u8, line, "worktree ")) {
+            if (current) |item| try items.append(allocator, item);
+            current = .{
+                .path = try allocator.dupe(u8, line["worktree ".len..]),
+                .head = try allocator.dupe(u8, ""),
+                .branch = try allocator.dupe(u8, ""),
+            };
+        } else if (std.mem.startsWith(u8, line, "HEAD ")) {
+            if (current) |*item| {
+                allocator.free(item.head);
+                item.head = try allocator.dupe(u8, line["HEAD ".len..]);
+            }
+        } else if (std.mem.startsWith(u8, line, "branch ")) {
+            if (current) |*item| {
+                allocator.free(item.branch);
+                item.branch = try allocator.dupe(u8, trimRef(line["branch ".len..]));
+            }
+        } else if (std.mem.eql(u8, line, "detached")) {
+            if (current) |*item| item.detached = true;
+        }
+    }
+
+    if (current) |item| try items.append(allocator, item);
+    return items.toOwnedSlice(allocator);
 }
 
 pub fn parsePorcelain(contents: []const u8) GitSummary {
@@ -74,6 +158,21 @@ fn isSuccess(term: std.process.Child.Term) bool {
     };
 }
 
+fn emptyWorktrees(allocator: std.mem.Allocator) WorktreeList {
+    return .{ .allocator = allocator, .items = &.{} };
+}
+
+fn trimRef(value: []const u8) []const u8 {
+    if (std.mem.startsWith(u8, value, "refs/heads/")) return value["refs/heads/".len..];
+    return value;
+}
+
+fn freeWorktree(allocator: std.mem.Allocator, item: Worktree) void {
+    allocator.free(item.path);
+    allocator.free(item.head);
+    allocator.free(item.branch);
+}
+
 test "parse porcelain counts statuses" {
     const summary = parsePorcelain(
         \\ M src/main.zig
@@ -96,4 +195,27 @@ test "parse porcelain ignores empty lines" {
 
     try std.testing.expectEqual(@as(usize, 0), summary.modified);
     try std.testing.expectEqual(@as(usize, 0), summary.untracked);
+}
+
+test "parse worktree porcelain output" {
+    const items = try parseWorktreePorcelain(std.testing.allocator,
+        \\worktree /repo
+        \\HEAD abc123
+        \\branch refs/heads/main
+        \\
+        \\worktree /repo-feature
+        \\HEAD def456
+        \\detached
+        \\
+    );
+    defer {
+        for (items) |item| freeWorktree(std.testing.allocator, item);
+        std.testing.allocator.free(items);
+    }
+
+    try std.testing.expectEqual(@as(usize, 2), items.len);
+    try std.testing.expectEqualStrings("/repo", items[0].path);
+    try std.testing.expectEqualStrings("main", items[0].branch);
+    try std.testing.expect(!items[0].detached);
+    try std.testing.expect(items[1].detached);
 }

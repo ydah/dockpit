@@ -130,6 +130,11 @@ const RootWidget = struct {
                     ctx.consumeAndRedraw();
                     return;
                 }
+                if (key.matches('t', .{})) {
+                    try self.showWorktrees();
+                    ctx.consumeAndRedraw();
+                    return;
+                }
                 if (key.matches('w', .{})) {
                     try self.toggleWatch(ctx);
                     ctx.consumeAndRedraw();
@@ -243,6 +248,7 @@ const RootWidget = struct {
                 self.state.dispatch(.{ .set_status = "log cleared" });
             },
             .refresh_git => self.refreshGit(),
+            .show_worktrees => try self.showWorktrees(),
             .toggle_watch => try self.toggleWatch(ctx),
             .search_tasks => {
                 self.state.dispatch(.enter_search);
@@ -427,6 +433,32 @@ const RootWidget = struct {
         self.state.dispatch(.{ .set_git = git.loadSummary(self.allocator, self.io, self.state.project_root) });
     }
 
+    fn showWorktrees(self: *RootWidget) !void {
+        if (!self.git_enabled) {
+            self.state.dispatch(.{ .set_status = "git disabled" });
+            return;
+        }
+
+        var list = git.loadWorktrees(self.allocator, self.io, self.state.project_root);
+        defer list.deinit();
+
+        try self.state.log.push(.system, "Git worktrees", timestampMs(self.io));
+        if (list.items.len == 0) {
+            try self.state.log.push(.system, "(none)", timestampMs(self.io));
+            return;
+        }
+
+        for (list.items) |item| {
+            const label = if (item.detached)
+                try std.fmt.allocPrint(self.allocator, "{s}  detached {s}", .{ item.path, shortHead(item.head) })
+            else
+                try std.fmt.allocPrint(self.allocator, "{s}  {s}", .{ item.path, item.branch });
+            defer self.allocator.free(label);
+            try self.state.log.push(.system, label, timestampMs(self.io));
+        }
+        self.state.dispatch(.{ .set_status = "worktrees shown" });
+    }
+
     fn lastTask(self: *RootWidget) ?task.TaskSpec {
         const task_id = self.state.last_task_id orelse return null;
         for (self.state.tasks) |item| {
@@ -546,7 +578,7 @@ const RootWidget = struct {
             git_line;
         widgets.writeTextClipped(surface, rect.y + 1, rect.x + 2, mode_line, rect.width - 4);
         if (rect.height > 2) {
-            widgets.writeTextClipped(surface, rect.y + 2, rect.x + 2, "Enter run  / search  : palette  w watch  r rerun  x cancel  c clear  g git  q quit", rect.width - 4);
+            widgets.writeTextClipped(surface, rect.y + 2, rect.x + 2, "Enter run  / search  : palette  w watch  t worktrees  r rerun  x cancel  c clear  g git  q quit", rect.width - 4);
             widgets.writeTextClipped(surface, rect.y + 2, rect.x + 68, status, rect.width - 4);
         }
     }
@@ -557,6 +589,7 @@ const PaletteCommandId = enum {
     rerun_last,
     clear_output,
     refresh_git,
+    show_worktrees,
     toggle_watch,
     search_tasks,
     quit,
@@ -572,6 +605,7 @@ const palette_commands = [_]PaletteCommand{
     .{ .id = .rerun_last, .label = "Rerun last task" },
     .{ .id = .clear_output, .label = "Clear output" },
     .{ .id = .refresh_git, .label = "Refresh Git status" },
+    .{ .id = .show_worktrees, .label = "Show Git worktrees" },
     .{ .id = .toggle_watch, .label = "Toggle file watch" },
     .{ .id = .search_tasks, .label = "Search tasks" },
     .{ .id = .quit, .label = "Quit" },
@@ -638,7 +672,11 @@ fn formatGitLine(buffer: []u8, enabled: bool, summary: git.GitSummary) []const u
 
     return std.fmt.bufPrint(
         buffer,
-        "branch: {s}  modified: {d}  added: {d}  deleted: {d}  untracked: {d}",
-        .{ summary.branch, summary.modified, summary.added, summary.deleted, summary.untracked },
+        "branch: {s}  modified: {d}  added: {d}  deleted: {d}  untracked: {d}  worktrees: {d}",
+        .{ summary.branch, summary.modified, summary.added, summary.deleted, summary.untracked, summary.worktrees },
     ) catch "git: error";
+}
+
+fn shortHead(head: []const u8) []const u8 {
+    return head[0..@min(head.len, 8)];
 }
