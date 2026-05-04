@@ -38,6 +38,7 @@ const RootWidget = struct {
     io: std.Io,
     env_map: *std.process.Environ.Map,
     state: *app_state.AppState,
+    running: ?*RunningJob = null,
 
     fn widget(self: *RootWidget) vxfw.Widget {
         return .{
@@ -56,6 +57,15 @@ const RootWidget = struct {
         switch (event) {
             .key_press => |key| {
                 if (key.matches('q', .{}) or key.matches('c', .{ .ctrl = true })) {
+                    if (self.running) |job| {
+                        if (!job.done.load(.acquire)) {
+                            self.state.dispatch(.{ .set_status = "task running" });
+                            ctx.consumeAndRedraw();
+                            return;
+                        }
+                        try self.finishJob(job);
+                        self.running = null;
+                    }
                     ctx.quit = true;
                     ctx.consume_event = true;
                     return;
@@ -72,15 +82,20 @@ const RootWidget = struct {
                 }
                 if (key.matches(vaxis.Key.enter, .{})) {
                     if (self.state.selectedTask()) |selected| {
-                        try self.runTask(selected);
+                        try self.startTask(ctx, selected);
                     }
                     ctx.consumeAndRedraw();
                     return;
                 }
                 if (key.matches('r', .{})) {
                     if (self.lastTask()) |last| {
-                        try self.runTask(last);
+                        try self.startTask(ctx, last);
                     }
+                    ctx.consumeAndRedraw();
+                    return;
+                }
+                if (key.matches('x', .{})) {
+                    self.requestCancel();
                     ctx.consumeAndRedraw();
                     return;
                 }
@@ -90,31 +105,85 @@ const RootWidget = struct {
                     ctx.consumeAndRedraw();
                 }
             },
+            .tick => try self.pollRunning(ctx),
             else => {},
         }
     }
 
-    fn runTask(self: *RootWidget, selected: task.TaskSpec) !void {
+    fn startTask(self: *RootWidget, ctx: *vxfw.EventContext, selected: task.TaskSpec) !void {
+        if (self.running) |job| {
+            if (!job.done.load(.acquire)) {
+                self.state.dispatch(.{ .set_status = "task already running" });
+                return;
+            }
+            try self.finishJob(job);
+            self.running = null;
+        }
+
         self.state.dispatch(.{ .set_last_task = selected.id });
         self.state.dispatch(.{ .set_status = "running" });
 
         const command_line = try formatCommand(self.allocator, selected.argv);
         try self.state.log.push(.system, command_line, timestampMs(self.io));
 
-        const result = runner.runTask(self.allocator, self.io, selected, self.env_map) catch |err| {
-            try self.state.log.push(.stderr, @errorName(err), timestampMs(self.io));
+        const job = try self.allocator.create(RunningJob);
+        job.* = .{
+            .allocator = self.allocator,
+            .io = self.io,
+            .env_map = self.env_map,
+            .task_spec = selected,
+        };
+        job.thread = try std.Thread.spawn(.{}, RunningJob.run, .{job});
+        self.running = job;
+        try ctx.tick(100, self.widget());
+    }
+
+    fn pollRunning(self: *RootWidget, ctx: *vxfw.EventContext) !void {
+        const job = self.running orelse return;
+        if (!job.done.load(.acquire)) {
+            try ctx.tick(100, self.widget());
+            return;
+        }
+
+        try self.finishJob(job);
+        self.running = null;
+        ctx.redraw = true;
+    }
+
+    fn finishJob(self: *RootWidget, job: *RunningJob) !void {
+        job.thread.join();
+        defer self.allocator.destroy(job);
+
+        if (job.err_name) |err_name| {
+            try self.state.log.push(.stderr, err_name, timestampMs(self.io));
             self.state.dispatch(.{ .set_status = "failed to start" });
             return;
-        };
+        }
 
+        const result = job.result orelse return;
         try appendOutputLines(&self.state.log, .stdout, result.stdout, self.io);
         try appendOutputLines(&self.state.log, .stderr, result.stderr, self.io);
 
-        const status = if (result.exitCode()) |code|
+        const status = if (job.cancel_requested.load(.acquire))
+            "cancel requested"
+        else if (result.exitCode()) |code|
             try std.fmt.allocPrint(self.allocator, "exit {d}", .{code})
         else
             "signal";
         self.state.dispatch(.{ .set_status = status });
+    }
+
+    fn requestCancel(self: *RootWidget) void {
+        const job = self.running orelse {
+            self.state.dispatch(.{ .set_status = "no running task" });
+            return;
+        };
+        if (job.done.load(.acquire)) {
+            self.state.dispatch(.{ .set_status = "task finished" });
+            return;
+        }
+        job.cancel_requested.store(true, .release);
+        self.state.dispatch(.{ .set_status = "cancel requested" });
     }
 
     fn lastTask(self: *RootWidget) ?task.TaskSpec {
@@ -185,9 +254,30 @@ const RootWidget = struct {
         const status = if (self.state.status_message.len > 0) self.state.status_message else "ready";
         widgets.writeTextClipped(surface, rect.y + 1, rect.x + 2, self.state.project_root, rect.width - 4);
         if (rect.height > 2) {
-            widgets.writeTextClipped(surface, rect.y + 2, rect.x + 2, "Enter run  r rerun  c clear  j/k move  q quit", rect.width - 4);
+            widgets.writeTextClipped(surface, rect.y + 2, rect.x + 2, "Enter run  r rerun  x cancel  c clear  j/k move  q quit", rect.width - 4);
             widgets.writeTextClipped(surface, rect.y + 2, rect.x + 58, status, rect.width - 4);
         }
+    }
+};
+
+const RunningJob = struct {
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    env_map: *std.process.Environ.Map,
+    task_spec: task.TaskSpec,
+    thread: std.Thread = undefined,
+    done: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
+    cancel_requested: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
+    result: ?runner.RunResult = null,
+    err_name: ?[]const u8 = null,
+
+    fn run(job: *RunningJob) void {
+        job.result = runner.runTask(job.allocator, job.io, job.task_spec, job.env_map) catch |err| {
+            job.err_name = @errorName(err);
+            job.done.store(true, .release);
+            return;
+        };
+        job.done.store(true, .release);
     }
 };
 
