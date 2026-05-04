@@ -27,6 +27,11 @@ pub const RunResult = struct {
             else => null,
         };
     }
+
+    pub fn deinit(result: RunResult, allocator: std.mem.Allocator) void {
+        allocator.free(result.stdout);
+        allocator.free(result.stderr);
+    }
 };
 
 pub fn runTask(
@@ -154,9 +159,13 @@ pub fn runTaskStreaming(
         try child.wait(io);
     const elapsed = start.durationTo(std.Io.Clock.awake.now(io)).toMilliseconds();
 
+    const stdout_owned = try stdout.toOwnedSlice(allocator);
+    errdefer allocator.free(stdout_owned);
+    const stderr_owned = try stderr.toOwnedSlice(allocator);
+
     return .{
-        .stdout = try stdout.toOwnedSlice(allocator),
-        .stderr = try stderr.toOwnedSlice(allocator),
+        .stdout = stdout_owned,
+        .stderr = stderr_owned,
         .term = term,
         .elapsed_ms = @intCast(@max(0, elapsed)),
     };

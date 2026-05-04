@@ -369,7 +369,7 @@ const RootWidget = struct {
         const job = try self.allocator.create(RunningJob);
         job.* = .{
             .id = self.next_job_id,
-            .allocator = self.allocator,
+            .allocator = std.heap.smp_allocator,
             .io = self.io,
             .env_map = self.env_map,
             .task_spec = selected,
@@ -523,8 +523,8 @@ const RootWidget = struct {
                 .stdout => &job.pending_stdout,
                 .stderr => &job.pending_stderr,
             };
-            try appendStreamBytes(&self.state.log, kind, pending, event.bytes, self.allocator, self.io);
-            self.allocator.free(event.bytes);
+            try appendStreamBytes(&self.state.log, kind, pending, event.bytes, job.allocator, self.io);
+            job.allocator.free(event.bytes);
         }
         job.events.clearRetainingCapacity();
 
@@ -845,6 +845,7 @@ const RunningJob = struct {
         job.events.deinit(job.allocator);
         job.pending_stdout.deinit(job.allocator);
         job.pending_stderr.deinit(job.allocator);
+        if (job.result) |result| result.deinit(job.allocator);
     }
 
     fn pushEvent(job: *RunningJob, kind: runner.StreamKind, bytes: []const u8) !void {
