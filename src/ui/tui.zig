@@ -9,6 +9,7 @@ const history = @import("../core/history.zig");
 const log_buffer = @import("../core/log_buffer.zig");
 const runner = @import("../core/runner.zig");
 const task = @import("../core/task.zig");
+const watch = @import("../core/watch.zig");
 const layout = @import("layout.zig");
 const widgets = @import("widgets.zig");
 
@@ -52,8 +53,12 @@ const RootWidget = struct {
     jobs: std.ArrayList(*RunningJob) = .empty,
     next_job_id: usize = 1,
     palette_index: usize = 0,
+    watch_enabled: bool = false,
+    watch_snapshot: ?watch.Snapshot = null,
+    last_watch_ms: u64 = 0,
 
     fn deinit(self: *RootWidget) void {
+        if (self.watch_snapshot) |*snapshot| snapshot.deinit();
         for (self.jobs.items) |job| {
             if (!job.done.load(.acquire)) job.cancel_requested.store(true, .release);
             job.thread.join();
@@ -125,6 +130,11 @@ const RootWidget = struct {
                     ctx.consumeAndRedraw();
                     return;
                 }
+                if (key.matches('w', .{})) {
+                    try self.toggleWatch(ctx);
+                    ctx.consumeAndRedraw();
+                    return;
+                }
                 if (key.matches('c', .{})) {
                     self.state.dispatch(.clear_log);
                     self.state.dispatch(.{ .set_status = "log cleared" });
@@ -145,7 +155,7 @@ const RootWidget = struct {
                     ctx.consumeAndRedraw();
                 }
             },
-            .tick => try self.pollRunning(ctx),
+            .tick => try self.handleTick(ctx),
             else => {},
         }
     }
@@ -233,6 +243,7 @@ const RootWidget = struct {
                 self.state.dispatch(.{ .set_status = "log cleared" });
             },
             .refresh_git => self.refreshGit(),
+            .toggle_watch => try self.toggleWatch(ctx),
             .search_tasks => {
                 self.state.dispatch(.enter_search);
                 self.state.dispatch(.{ .set_status = "search" });
@@ -272,12 +283,70 @@ const RootWidget = struct {
         try ctx.tick(100, self.widget());
     }
 
-    fn pollRunning(self: *RootWidget, ctx: *vxfw.EventContext) !void {
+    fn handleTick(self: *RootWidget, ctx: *vxfw.EventContext) !void {
         try self.finishCompletedJobs();
+        try self.pollWatch(ctx);
         if (self.runningJobCount() > 0) {
             try ctx.tick(100, self.widget());
+        } else if (self.watch_enabled) {
+            try ctx.tick(1000, self.widget());
         }
         ctx.redraw = true;
+    }
+
+    fn toggleWatch(self: *RootWidget, ctx: *vxfw.EventContext) !void {
+        if (self.watch_enabled) {
+            self.watch_enabled = false;
+            if (self.watch_snapshot) |*snapshot| snapshot.deinit();
+            self.watch_snapshot = null;
+            self.state.dispatch(.{ .set_status = "watch off" });
+            return;
+        }
+
+        self.watch_snapshot = try watch.capture(self.allocator, self.io, self.state.project_root);
+        self.last_watch_ms = timestampMs(self.io);
+        self.watch_enabled = true;
+        self.state.dispatch(.{ .set_status = "watch on" });
+        try ctx.tick(1000, self.widget());
+    }
+
+    fn pollWatch(self: *RootWidget, ctx: *vxfw.EventContext) !void {
+        if (!self.watch_enabled) return;
+
+        const now = timestampMs(self.io);
+        if (now < self.last_watch_ms + 1000) return;
+        self.last_watch_ms = now;
+
+        var current = watch.capture(self.allocator, self.io, self.state.project_root) catch |err| {
+            self.state.dispatch(.{ .set_status = @errorName(err) });
+            return;
+        };
+        errdefer current.deinit();
+
+        const previous = self.watch_snapshot orelse {
+            self.watch_snapshot = current;
+            return;
+        };
+        if (!current.changedSince(previous)) {
+            current.deinit();
+            return;
+        }
+
+        var old = self.watch_snapshot.?;
+        old.deinit();
+        self.watch_snapshot = current;
+
+        if (self.runningJobCount() > 0) {
+            self.state.dispatch(.{ .set_status = "watch changed" });
+            return;
+        }
+
+        const item = self.lastTask() orelse self.state.selectedTask() orelse {
+            self.state.dispatch(.{ .set_status = "watch changed" });
+            return;
+        };
+        self.state.dispatch(.{ .set_status = "watch rerun" });
+        try self.startTask(ctx, item);
     }
 
     fn finishCompletedJobs(self: *RootWidget) !void {
@@ -471,11 +540,13 @@ const RootWidget = struct {
             "palette: Enter run command  Esc close"
         else if (running_count > 0)
             std.fmt.bufPrint(&mode_buffer, "running: {d}  {s}", .{ running_count, git_line }) catch "running"
+        else if (self.watch_enabled)
+            std.fmt.bufPrint(&mode_buffer, "watch on  {s}", .{git_line}) catch "watch on"
         else
             git_line;
         widgets.writeTextClipped(surface, rect.y + 1, rect.x + 2, mode_line, rect.width - 4);
         if (rect.height > 2) {
-            widgets.writeTextClipped(surface, rect.y + 2, rect.x + 2, "Enter run  / search  : palette  r rerun  x cancel  c clear  g git  q quit", rect.width - 4);
+            widgets.writeTextClipped(surface, rect.y + 2, rect.x + 2, "Enter run  / search  : palette  w watch  r rerun  x cancel  c clear  g git  q quit", rect.width - 4);
             widgets.writeTextClipped(surface, rect.y + 2, rect.x + 68, status, rect.width - 4);
         }
     }
@@ -486,6 +557,7 @@ const PaletteCommandId = enum {
     rerun_last,
     clear_output,
     refresh_git,
+    toggle_watch,
     search_tasks,
     quit,
 };
@@ -500,6 +572,7 @@ const palette_commands = [_]PaletteCommand{
     .{ .id = .rerun_last, .label = "Rerun last task" },
     .{ .id = .clear_output, .label = "Clear output" },
     .{ .id = .refresh_git, .label = "Refresh Git status" },
+    .{ .id = .toggle_watch, .label = "Toggle file watch" },
     .{ .id = .search_tasks, .label = "Search tasks" },
     .{ .id = .quit, .label = "Quit" },
 };
