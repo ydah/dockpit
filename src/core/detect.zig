@@ -518,12 +518,13 @@ fn detectDockerComposeTasks(
     project_root: []const u8,
     tasks: *std.ArrayList(task.TaskSpec),
 ) !void {
-    if (!try hasAnyFile(
+    const contents = try readFirstProjectFile(
         allocator,
         io,
         project_root,
         &.{ "compose.yaml", "compose.yml", "docker-compose.yml", "docker-compose.yaml" },
-    )) return;
+    ) orelse return;
+    defer allocator.free(contents);
 
     try appendUniqueTask(allocator, tasks, try makeTask(
         allocator,
@@ -557,6 +558,66 @@ fn detectDockerComposeTasks(
         project_root,
         .docker,
     ));
+
+    var services: std.ArrayList([]const u8) = .empty;
+    defer services.deinit(allocator);
+    try collectYamlSectionKeys(allocator, contents, "services", &services);
+
+    for (services.items) |service| {
+        defer allocator.free(service);
+
+        const up_id = try prefixedId(allocator, "compose-up", service);
+        defer allocator.free(up_id);
+        const up_label = try std.fmt.allocPrint(allocator, "docker compose up {s}", .{service});
+        defer allocator.free(up_label);
+        try appendUniqueTask(allocator, tasks, try makeTask(
+            allocator,
+            up_id,
+            up_label,
+            &.{ "docker", "compose", "up", service },
+            project_root,
+            .docker,
+        ));
+
+        const restart_id = try prefixedId(allocator, "compose-restart", service);
+        defer allocator.free(restart_id);
+        const restart_label = try std.fmt.allocPrint(allocator, "docker compose restart {s}", .{service});
+        defer allocator.free(restart_label);
+        try appendUniqueTask(allocator, tasks, try makeTask(
+            allocator,
+            restart_id,
+            restart_label,
+            &.{ "docker", "compose", "restart", service },
+            project_root,
+            .docker,
+        ));
+
+        const logs_id = try prefixedId(allocator, "compose-logs", service);
+        defer allocator.free(logs_id);
+        const logs_label = try std.fmt.allocPrint(allocator, "docker compose logs --tail=200 {s}", .{service});
+        defer allocator.free(logs_label);
+        try appendUniqueTask(allocator, tasks, try makeTask(
+            allocator,
+            logs_id,
+            logs_label,
+            &.{ "docker", "compose", "logs", "--tail=200", service },
+            project_root,
+            .docker,
+        ));
+
+        const build_id = try prefixedId(allocator, "compose-build", service);
+        defer allocator.free(build_id);
+        const build_label = try std.fmt.allocPrint(allocator, "docker compose build {s}", .{service});
+        defer allocator.free(build_label);
+        try appendUniqueTask(allocator, tasks, try makeTask(
+            allocator,
+            build_id,
+            build_label,
+            &.{ "docker", "compose", "build", service },
+            project_root,
+            .docker,
+        ));
+    }
 }
 
 fn appendUniqueTask(
@@ -1188,13 +1249,19 @@ test "detect docker compose tasks" {
 
     const tasks = try detectTasks(allocator, std.testing.io, root, "missing.json");
 
-    try std.testing.expectEqual(@as(usize, 4), tasks.len);
+    try std.testing.expectEqual(@as(usize, 8), tasks.len);
     try std.testing.expectEqualStrings("compose-up", tasks[0].id);
     try std.testing.expectEqualStrings("docker", tasks[0].argv[0]);
     try std.testing.expectEqualStrings("compose", tasks[0].argv[1]);
     try std.testing.expectEqualStrings("compose-down", tasks[1].id);
     try std.testing.expectEqualStrings("compose-ps", tasks[2].id);
     try std.testing.expectEqualStrings("compose-logs", tasks[3].id);
+    try std.testing.expectEqualStrings("compose-up-app", tasks[4].id);
+    try std.testing.expectEqualStrings("app", tasks[4].argv[3]);
+    try std.testing.expectEqualStrings("compose-restart-app", tasks[5].id);
+    try std.testing.expectEqualStrings("compose-logs-app", tasks[6].id);
+    try std.testing.expectEqualStrings("app", tasks[6].argv[4]);
+    try std.testing.expectEqualStrings("compose-build-app", tasks[7].id);
     try std.testing.expectEqual(task.TaskSource.docker, tasks[0].source);
 }
 
