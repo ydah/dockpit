@@ -3,6 +3,7 @@ pub const cli = @import("cli.zig");
 pub const task = @import("core/task.zig");
 pub const log_buffer = @import("core/log_buffer.zig");
 pub const project = @import("core/project.zig");
+pub const config = @import("core/config.zig");
 
 test {
     _ = version;
@@ -10,4 +11,5 @@ test {
     _ = task;
     _ = log_buffer;
     _ = project;
+    _ = config;
 }

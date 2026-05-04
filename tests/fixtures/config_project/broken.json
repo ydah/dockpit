@@ -1,0 +1,7 @@
+{
+  "tasks": [
+    {
+      "id": "broken",
+      "cmd": ["zig", "build"]
+    }
+  ]
