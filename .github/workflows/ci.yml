@@ -52,6 +52,24 @@ jobs:
       - name: Smoke Print Tasks
         run: zig build run -- --print-tasks
 
+      - name: Smoke Fixture Detection
+        run: zig build run -- --project-dir tests/fixtures/pnpm_project --print-tasks
+
+      - name: Smoke No Git Project
+        run: |
+          tmpdir="$(mktemp -d)"
+          zig build run -- --project-dir "$tmpdir" --no-git --print-tasks
+
+      - name: Smoke Broken Config Fallback
+        run: zig build run -- --project-dir tests/fixtures/config_project --config broken.json --print-tasks
+
+      - name: Smoke Strict Config Failure
+        run: |
+          if zig build run -- --project-dir tests/fixtures/config_project --config broken.json --strict-config --print-tasks; then
+            echo "strict config unexpectedly succeeded"
+            exit 1
+          fi
+
       - name: Smoke Help
         run: zig build run -- --help
 
