@@ -3,6 +3,7 @@ const vaxis = @import("vaxis");
 const vxfw = vaxis.vxfw;
 
 const app_state = @import("../core/app_state.zig");
+const config = @import("../core/config.zig");
 const failures = @import("../core/failures.zig");
 const git = @import("../core/git.zig");
 const history = @import("../core/history.zig");
@@ -21,6 +22,7 @@ pub fn run(
     tasks: []const task.TaskSpec,
     git_summary: git.GitSummary,
     git_enabled: bool,
+    settings: config.Settings,
 ) !void {
     var tty_buffer: [4096]u8 = undefined;
     var app = try vxfw.App.init(io, allocator, env_map, &tty_buffer);
@@ -38,6 +40,7 @@ pub fn run(
         .env_map = env_map,
         .git_enabled = git_enabled,
         .state = &state,
+        .settings = settings,
     };
     defer root.deinit();
 
@@ -50,6 +53,7 @@ const RootWidget = struct {
     env_map: *std.process.Environ.Map,
     git_enabled: bool,
     state: *app_state.AppState,
+    settings: config.Settings,
     jobs: std.ArrayList(*RunningJob) = .empty,
     next_job_id: usize = 1,
     palette_index: usize = 0,
@@ -85,7 +89,7 @@ const RootWidget = struct {
             .key_press => |key| {
                 if (self.handleSearchKey(ctx, key)) return;
                 if (try self.handlePaletteKey(ctx, key)) return;
-                if (key.matches('q', .{}) or key.matches('c', .{ .ctrl = true })) {
+                if (matchesBinding(key, self.settings.keybindings.quit) or key.matches('c', .{ .ctrl = true })) {
                     try self.finishCompletedJobs();
                     if (self.runningJobCount() > 0) {
                         self.state.dispatch(.{ .set_status = "task running" });
@@ -106,53 +110,53 @@ const RootWidget = struct {
                     ctx.consumeAndRedraw();
                     return;
                 }
-                if (key.matches(vaxis.Key.enter, .{})) {
+                if (matchesBinding(key, self.settings.keybindings.run)) {
                     if (self.state.selectedTask()) |selected| {
                         try self.startTask(ctx, selected);
                     }
                     ctx.consumeAndRedraw();
                     return;
                 }
-                if (key.matches('r', .{})) {
+                if (matchesBinding(key, self.settings.keybindings.rerun)) {
                     if (self.lastTask()) |last| {
                         try self.startTask(ctx, last);
                     }
                     ctx.consumeAndRedraw();
                     return;
                 }
-                if (key.matches('x', .{})) {
+                if (matchesBinding(key, self.settings.keybindings.cancel)) {
                     self.requestCancel();
                     ctx.consumeAndRedraw();
                     return;
                 }
-                if (key.matches('g', .{})) {
+                if (matchesBinding(key, self.settings.keybindings.git)) {
                     self.refreshGit();
                     ctx.consumeAndRedraw();
                     return;
                 }
-                if (key.matches('t', .{})) {
+                if (matchesBinding(key, self.settings.keybindings.worktrees)) {
                     try self.showWorktrees();
                     ctx.consumeAndRedraw();
                     return;
                 }
-                if (key.matches('w', .{})) {
+                if (matchesBinding(key, self.settings.keybindings.watch)) {
                     try self.toggleWatch(ctx);
                     ctx.consumeAndRedraw();
                     return;
                 }
-                if (key.matches('c', .{})) {
+                if (matchesBinding(key, self.settings.keybindings.clear)) {
                     self.state.dispatch(.clear_log);
                     self.state.dispatch(.{ .set_status = "log cleared" });
                     ctx.consumeAndRedraw();
                     return;
                 }
-                if (key.matches('/', .{})) {
+                if (matchesBinding(key, self.settings.keybindings.search)) {
                     self.state.dispatch(.enter_search);
                     self.state.dispatch(.{ .set_status = "search" });
                     ctx.consumeAndRedraw();
                     return;
                 }
-                if (key.matches(':', .{})) {
+                if (matchesBinding(key, self.settings.keybindings.palette)) {
                     self.state.dispatch(.exit_mode);
                     self.state.mode = .palette;
                     self.palette_index = 0;
@@ -509,8 +513,9 @@ const RootWidget = struct {
 
             const row: u16 = rect.y + 1 + @as(u16, @intCast(row_index));
             const marker = if (index == self.state.selected_task) ">" else " ";
-            widgets.writeText(surface, row, rect.x + 2, marker);
-            widgets.writeTextClipped(surface, row, rect.x + 4, item.label, max_width);
+            const style = selectedStyle(self.settings.theme, index == self.state.selected_task);
+            widgets.writeTextStyled(surface, row, rect.x + 2, marker, style);
+            widgets.writeTextClippedStyled(surface, row, rect.x + 4, item.label, max_width, style);
             row_index += 1;
         }
         if (row_index == 0) {
@@ -576,7 +581,7 @@ const RootWidget = struct {
             std.fmt.bufPrint(&mode_buffer, "watch on  {s}", .{git_line}) catch "watch on"
         else
             git_line;
-        widgets.writeTextClipped(surface, rect.y + 1, rect.x + 2, mode_line, rect.width - 4);
+        widgets.writeTextClippedStyled(surface, rect.y + 1, rect.x + 2, mode_line, rect.width - 4, statusStyle(self.settings.theme));
         if (rect.height > 2) {
             widgets.writeTextClipped(surface, rect.y + 2, rect.x + 2, "Enter run  / search  : palette  w watch  t worktrees  r rerun  x cancel  c clear  g git  q quit", rect.width - 4);
             widgets.writeTextClipped(surface, rect.y + 2, rect.x + 68, status, rect.width - 4);
@@ -679,4 +684,50 @@ fn formatGitLine(buffer: []u8, enabled: bool, summary: git.GitSummary) []const u
 
 fn shortHead(head: []const u8) []const u8 {
     return head[0..@min(head.len, 8)];
+}
+
+fn matchesBinding(key: vaxis.Key, binding: []const u8) bool {
+    if (binding.len == 0) return false;
+    if (std.mem.startsWith(u8, binding, "ctrl+") and binding.len == "ctrl+x".len) {
+        return key.matches(binding["ctrl+".len], .{ .ctrl = true });
+    }
+    if (std.mem.eql(u8, binding, "enter")) return key.matches(vaxis.Key.enter, .{});
+    if (std.mem.eql(u8, binding, "escape")) return key.matches(vaxis.Key.escape, .{});
+    if (std.mem.eql(u8, binding, "backspace")) return key.matches(vaxis.Key.backspace, .{});
+    if (std.mem.eql(u8, binding, "up")) return key.matches(vaxis.Key.up, .{});
+    if (std.mem.eql(u8, binding, "down")) return key.matches(vaxis.Key.down, .{});
+    if (binding.len == 1) return key.matches(binding[0], .{});
+    return false;
+}
+
+fn selectedStyle(theme: config.Theme, selected: bool) vaxis.Style {
+    if (!selected) return normalStyle(theme);
+    return switch (theme) {
+        .default, .dark => .{ .bold = true, .reverse = true },
+        .light => .{ .bold = true, .fg = .{ .index = 16 }, .bg = .{ .index = 15 } },
+        .high_contrast => .{ .bold = true, .fg = .{ .index = 16 }, .bg = .{ .index = 11 } },
+    };
+}
+
+fn statusStyle(theme: config.Theme) vaxis.Style {
+    return switch (theme) {
+        .default => .{},
+        .dark => .{ .fg = .{ .index = 14 } },
+        .light => .{ .fg = .{ .index = 4 } },
+        .high_contrast => .{ .bold = true, .fg = .{ .index = 11 } },
+    };
+}
+
+fn normalStyle(theme: config.Theme) vaxis.Style {
+    return switch (theme) {
+        .default, .dark, .light => .{},
+        .high_contrast => .{ .fg = .{ .index = 15 } },
+    };
+}
+
+test "key binding matcher handles named and ctrl keys" {
+    try std.testing.expect(matchesBinding(.{ .codepoint = vaxis.Key.enter }, "enter"));
+    try std.testing.expect(matchesBinding(.{ .codepoint = 'r', .mods = .{ .ctrl = true } }, "ctrl+r"));
+    try std.testing.expect(matchesBinding(.{ .codepoint = ':' }, ":"));
+    try std.testing.expect(!matchesBinding(.{ .codepoint = 'r' }, "ctrl+r"));
 }

@@ -1,0 +1,7 @@
+{
+  "theme": "high-contrast",
+  "keybindings": {
+    "rerun": "ctrl+r",
+    "palette": "p"
+  }
+}

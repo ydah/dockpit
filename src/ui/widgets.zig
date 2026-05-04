@@ -36,6 +36,21 @@ pub fn writeText(surface: vxfw.Surface, row: u16, col: u16, text: []const u8) vo
 }
 
 pub fn writeTextClipped(surface: vxfw.Surface, row: u16, col: u16, text: []const u8, max_width: u16) void {
+    writeTextClippedStyled(surface, row, col, text, max_width, .{});
+}
+
+pub fn writeTextStyled(surface: vxfw.Surface, row: u16, col: u16, text: []const u8, style: vaxis.Style) void {
+    writeTextClippedStyled(surface, row, col, text, surface.size.width, style);
+}
+
+pub fn writeTextClippedStyled(
+    surface: vxfw.Surface,
+    row: u16,
+    col: u16,
+    text: []const u8,
+    max_width: u16,
+    style: vaxis.Style,
+) void {
     if (row >= surface.size.height or col >= surface.size.width) return;
 
     var current_col = col;
@@ -47,6 +62,7 @@ pub fn writeTextClipped(surface: vxfw.Surface, row: u16, col: u16, text: []const
                 .grapheme = text[index .. index + 1],
                 .width = 1,
             },
+            .style = style,
         });
         current_col += 1;
         written += 1;

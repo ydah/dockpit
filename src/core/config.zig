@@ -6,6 +6,71 @@ pub const ConfigError = error{
     InvalidConfig,
 };
 
+pub const Theme = enum {
+    default,
+    dark,
+    light,
+    high_contrast,
+
+    pub fn label(theme: Theme) []const u8 {
+        return switch (theme) {
+            .default => "default",
+            .dark => "dark",
+            .light => "light",
+            .high_contrast => "high-contrast",
+        };
+    }
+};
+
+pub const KeyBindings = struct {
+    run: []const u8 = "enter",
+    rerun: []const u8 = "r",
+    cancel: []const u8 = "x",
+    clear: []const u8 = "c",
+    git: []const u8 = "g",
+    worktrees: []const u8 = "t",
+    watch: []const u8 = "w",
+    search: []const u8 = "/",
+    palette: []const u8 = ":",
+    quit: []const u8 = "q",
+};
+
+pub const Settings = struct {
+    theme: Theme = .default,
+    keybindings: KeyBindings = .{},
+};
+
+pub fn loadSettings(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    project_root: []const u8,
+    config_path: []const u8,
+) !Settings {
+    const path = try resolveConfigPath(allocator, project_root, config_path);
+    defer allocator.free(path);
+
+    const bytes = std.Io.Dir.cwd().readFileAlloc(io, path, allocator, .limited(1024 * 1024)) catch |err| switch (err) {
+        error.FileNotFound, error.NotDir => return .{},
+        else => |e| return e,
+    };
+    defer allocator.free(bytes);
+
+    var parsed = try std.json.parseFromSlice(std.json.Value, allocator, bytes, .{});
+    defer parsed.deinit();
+
+    const root = parsed.value;
+    if (root != .object) return error.InvalidConfig;
+
+    var settings = Settings{};
+    if (root.object.get("theme")) |theme_value| {
+        settings.theme = try parseTheme(theme_value);
+    }
+    if (root.object.get("keybindings")) |keybindings_value| {
+        settings.keybindings = try parseKeybindings(allocator, keybindings_value, settings.keybindings);
+    }
+    return settings;
+}
+
 pub fn loadConfigTasks(
     allocator: std.mem.Allocator,
     io: std.Io,
@@ -38,6 +103,27 @@ pub fn loadConfigTasks(
     }
 
     return tasks.toOwnedSlice(allocator);
+}
+
+fn parseTheme(value: std.json.Value) !Theme {
+    const name = try requiredString(value);
+    if (std.mem.eql(u8, name, "default")) return .default;
+    if (std.mem.eql(u8, name, "dark")) return .dark;
+    if (std.mem.eql(u8, name, "light")) return .light;
+    if (std.mem.eql(u8, name, "high-contrast") or std.mem.eql(u8, name, "high_contrast")) return .high_contrast;
+    return error.InvalidConfig;
+}
+
+fn parseKeybindings(allocator: std.mem.Allocator, value: std.json.Value, defaults: KeyBindings) !KeyBindings {
+    if (value != .object) return error.InvalidConfig;
+    var bindings = defaults;
+
+    inline for (@typeInfo(KeyBindings).@"struct".fields) |field| {
+        if (value.object.get(field.name)) |binding_value| {
+            @field(bindings, field.name) = try allocator.dupe(u8, try requiredString(binding_value));
+        }
+    }
+    return bindings;
 }
 
 fn parseTask(allocator: std.mem.Allocator, project_root: []const u8, value: std.json.Value) !task.TaskSpec {
@@ -136,6 +222,24 @@ test "load config tasks from dockpit json" {
     try std.testing.expectEqualStrings(root, tasks[1].cwd);
     try std.testing.expectEqual(@as(usize, 1), tasks[0].env.len);
     try std.testing.expectEqualStrings("NODE_ENV", tasks[0].env[0].key);
+}
+
+test "load settings from dockpit json" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    const root = try std.Io.Dir.cwd().realPathFileAlloc(
+        std.testing.io,
+        "tests/fixtures/config_project",
+        allocator,
+    );
+
+    const settings = try loadSettings(allocator, std.testing.io, root, "settings.json");
+
+    try std.testing.expectEqual(Theme.high_contrast, settings.theme);
+    try std.testing.expectEqualStrings("ctrl+r", settings.keybindings.rerun);
+    try std.testing.expectEqualStrings("enter", settings.keybindings.run);
 }
 
 test "missing config returns empty task list" {
