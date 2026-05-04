@@ -1,0 +1,9 @@
+{
+  "tasks": [
+    {
+      "id": "zig-build",
+      "label": "custom build",
+      "cmd": ["zig", "build", "-Doptimize=ReleaseSafe"]
+    }
+  ]
+}
