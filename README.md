@@ -2,7 +2,7 @@
 
 `dockpit` is a Zig TUI project cockpit for local development workflows.
 
-The MVP discovers common project tasks, runs them without shell-string execution, and shows command output plus a compact Git status in one terminal screen.
+`dockpit` discovers common project tasks, runs them without shell-string execution, and shows command output plus Git/worktree status in one terminal screen.
 
 ## Install
 
@@ -54,10 +54,14 @@ zig build run -- --no-git
 | `j` / `Down` | Select next task |
 | `k` / `Up` | Select previous task |
 | `Enter` | Run selected task |
+| `/` | Fuzzy-search tasks |
+| `:` | Open command palette |
 | `r` | Rerun the last task |
 | `x` | Request cancellation for the running task |
 | `c` | Clear output |
 | `g` | Refresh Git status |
+| `t` | Show Git worktrees |
+| `w` | Toggle file-watch rerun |
 
 ## Configuration
 
@@ -65,6 +69,11 @@ Create `.dockpit.json` in the project root:
 
 ```json
 {
+  "theme": "high-contrast",
+  "keybindings": {
+    "rerun": "ctrl+r",
+    "palette": "p"
+  },
   "tasks": [
     {
       "id": "dev",
@@ -86,6 +95,8 @@ Create `.dockpit.json` in the project root:
 
 `cmd` must be an argv array. `dockpit` does not run user-configured commands through a shell.
 
+Supported themes are `default`, `dark`, `light`, and `high-contrast`. Keybinding names include `run`, `rerun`, `cancel`, `clear`, `git`, `worktrees`, `watch`, `search`, `palette`, and `quit`.
+
 ## Auto Detection
 
 `dockpit` detects tasks from these files in the project root:
@@ -99,12 +110,15 @@ Create `.dockpit.json` in the project root:
 | `package.json` | `npm run <script>` |
 | `Cargo.toml` | `cargo build`, `cargo test`, `cargo run` |
 | `go.mod` | `go test ./...`, `go build ./...`, `go run .` |
+| `compose.yaml` / `compose.yml` / `docker-compose.yml` / `docker-compose.yaml` | Docker Compose up/down/ps/logs |
 
-## MVP Limits
+## Runtime Notes
 
-- One task runs at a time.
-- TUI task execution runs in a background thread, but output is appended after the task exits.
+- Multiple tasks can run concurrently in background threads.
+- TUI task output is appended after each task exits.
 - `x` records a cancellation request safely; full process termination is still limited.
+- File watching uses a portable polling snapshot and ignores generated directories such as `.git`, `.zig-cache`, `zig-out`, `node_modules`, `target`, and `.dockpit`.
+- Per-project run history is stored in `.dockpit/history.log`.
 - Interactive terminal commands are not fully emulated.
 - Windows support has not been hardened.
 

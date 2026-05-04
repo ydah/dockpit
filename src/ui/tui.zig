@@ -495,7 +495,7 @@ const RootWidget = struct {
         const panes = layout.compute(width, height);
         self.drawTasks(surface, panes.tasks);
         self.drawOutput(surface, panes.output);
-        self.drawStatus(surface, panes.status);
+        self.drawStatus(ctx.arena, surface, panes.status);
 
         return surface;
     }
@@ -559,32 +559,30 @@ const RootWidget = struct {
         }
     }
 
-    fn drawStatus(self: *RootWidget, surface: vxfw.Surface, rect: layout.Rect) void {
+    fn drawStatus(self: *RootWidget, arena: std.mem.Allocator, surface: vxfw.Surface, rect: layout.Rect) void {
         widgets.drawBox(surface, rect, "Status");
         if (rect.height == 0 or rect.width <= 4) return;
 
         const status = if (self.state.status_message.len > 0) self.state.status_message else "ready";
-        var git_buffer: [512]u8 = undefined;
-        var mode_buffer: [512]u8 = undefined;
-        const git_line = formatGitLine(&git_buffer, self.git_enabled, self.state.git_summary);
+        const git_line = formatGitLine(arena, self.git_enabled, self.state.git_summary) catch "git: error";
         const running_count = self.runningJobCount();
         const mode_line = if (self.state.mode == .search)
-            std.fmt.bufPrint(&mode_buffer, "search: {s}  matches: {d}", .{
+            std.fmt.allocPrint(arena, "search: {s}  matches: {d}", .{
                 self.state.search_query.items,
                 self.state.visibleTaskCount(),
             }) catch "search"
         else if (self.state.mode == .palette)
             "palette: Enter run command  Esc close"
         else if (running_count > 0)
-            std.fmt.bufPrint(&mode_buffer, "running: {d}  {s}", .{ running_count, git_line }) catch "running"
+            std.fmt.allocPrint(arena, "running: {d}  {s}", .{ running_count, git_line }) catch "running"
         else if (self.watch_enabled)
-            std.fmt.bufPrint(&mode_buffer, "watch on  {s}", .{git_line}) catch "watch on"
+            std.fmt.allocPrint(arena, "watch on  {s}", .{git_line}) catch "watch on"
         else
             git_line;
-        widgets.writeTextClippedStyled(surface, rect.y + 1, rect.x + 2, mode_line, rect.width - 4, statusStyle(self.settings.theme));
+        const status_line = std.fmt.allocPrint(arena, "{s}  status: {s}", .{ mode_line, status }) catch mode_line;
+        widgets.writeTextClippedStyled(surface, rect.y + 1, rect.x + 2, status_line, rect.width - 4, statusStyle(self.settings.theme));
         if (rect.height > 2) {
-            widgets.writeTextClipped(surface, rect.y + 2, rect.x + 2, "Enter run  / search  : palette  w watch  t worktrees  r rerun  x cancel  c clear  g git  q quit", rect.width - 4);
-            widgets.writeTextClipped(surface, rect.y + 2, rect.x + 68, status, rect.width - 4);
+            widgets.writeTextClipped(surface, rect.y + 2, rect.x + 2, "Enter run / find : cmds w watch t trees r rerun x stop c clear g git q quit", rect.width - 4);
         }
     }
 };
@@ -671,15 +669,15 @@ fn timestampMs(io: std.Io) u64 {
     return @intCast(std.Io.Timestamp.now(io, .real).toMilliseconds());
 }
 
-fn formatGitLine(buffer: []u8, enabled: bool, summary: git.GitSummary) []const u8 {
+fn formatGitLine(allocator: std.mem.Allocator, enabled: bool, summary: git.GitSummary) ![]const u8 {
     if (!enabled) return "git: disabled";
     if (!summary.in_repo) return "git: none";
 
-    return std.fmt.bufPrint(
-        buffer,
+    return std.fmt.allocPrint(
+        allocator,
         "branch: {s}  modified: {d}  added: {d}  deleted: {d}  untracked: {d}  worktrees: {d}",
         .{ summary.branch, summary.modified, summary.added, summary.deleted, summary.untracked, summary.worktrees },
-    ) catch "git: error";
+    );
 }
 
 fn shortHead(head: []const u8) []const u8 {
