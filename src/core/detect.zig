@@ -35,7 +35,8 @@ fn detectZigTasks(
     project_root: []const u8,
     tasks: *std.ArrayList(task.TaskSpec),
 ) !void {
-    if (!try hasFile(allocator, io, project_root, "build.zig")) return;
+    const contents = try readFirstProjectFile(allocator, io, project_root, &.{"build.zig"}) orelse return;
+    defer allocator.free(contents);
 
     try appendUniqueTask(allocator, tasks, try makeTask(
         allocator,
@@ -53,6 +54,27 @@ fn detectZigTasks(
         project_root,
         .zig,
     ));
+
+    var steps: std.ArrayList([]const u8) = .empty;
+    defer steps.deinit(allocator);
+    try collectZigBuildSteps(allocator, contents, &steps);
+
+    for (steps.items) |step| {
+        defer allocator.free(step);
+        const id = try prefixedId(allocator, "zig", step);
+        defer allocator.free(id);
+        const label = try std.fmt.allocPrint(allocator, "zig build {s}", .{step});
+        defer allocator.free(label);
+
+        try appendUniqueTask(allocator, tasks, try makeTask(
+            allocator,
+            id,
+            label,
+            &.{ "zig", "build", step },
+            project_root,
+            .zig,
+        ));
+    }
 }
 
 fn detectMakeTasks(
@@ -396,6 +418,74 @@ fn collectMakeRuleTargets(
     }
 }
 
+fn collectZigBuildSteps(
+    allocator: std.mem.Allocator,
+    contents: []const u8,
+    steps: *std.ArrayList([]const u8),
+) !void {
+    var index: usize = 0;
+    while (std.mem.indexOfPos(u8, contents, index, ".step(")) |match_index| {
+        index = match_index + ".step(".len;
+        if (isInLineComment(contents, match_index)) continue;
+
+        var cursor = index;
+        skipWhitespace(contents, &cursor);
+        const name = try parseZigStringLiteral(allocator, contents, &cursor) orelse continue;
+        defer allocator.free(name);
+        if (!isMakeTargetName(name)) continue;
+        try appendUniqueName(allocator, steps, name);
+    }
+}
+
+fn parseZigStringLiteral(
+    allocator: std.mem.Allocator,
+    contents: []const u8,
+    cursor: *usize,
+) !?[]const u8 {
+    if (cursor.* >= contents.len or contents[cursor.*] != '"') return null;
+    cursor.* += 1;
+
+    var value: std.ArrayList(u8) = .empty;
+    errdefer value.deinit(allocator);
+
+    while (cursor.* < contents.len) {
+        const char = contents[cursor.*];
+        cursor.* += 1;
+
+        switch (char) {
+            '"' => {
+                const owned = try value.toOwnedSlice(allocator);
+                return owned;
+            },
+            '\n', '\r' => break,
+            '\\' => {
+                if (cursor.* >= contents.len) break;
+                const escaped = contents[cursor.*];
+                cursor.* += 1;
+                try value.append(allocator, escaped);
+            },
+            else => try value.append(allocator, char),
+        }
+    }
+
+    value.deinit(allocator);
+    return null;
+}
+
+fn skipWhitespace(contents: []const u8, cursor: *usize) void {
+    while (cursor.* < contents.len) : (cursor.* += 1) {
+        switch (contents[cursor.*]) {
+            ' ', '\t', '\n', '\r' => continue,
+            else => return,
+        }
+    }
+}
+
+fn isInLineComment(contents: []const u8, index: usize) bool {
+    const line_start = if (std.mem.lastIndexOfScalar(u8, contents[0..index], '\n')) |newline| newline + 1 else 0;
+    return std.mem.indexOf(u8, contents[line_start..index], "//") != null;
+}
+
 fn appendUniqueName(
     allocator: std.mem.Allocator,
     names: *std.ArrayList([]const u8),
@@ -456,6 +546,29 @@ test "detect zig project tasks" {
     try std.testing.expectEqual(@as(usize, 2), tasks.len);
     try std.testing.expectEqualStrings("zig-build", tasks[0].id);
     try std.testing.expectEqualStrings("zig-test", tasks[1].id);
+}
+
+test "detect zig build steps" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    const root = try std.Io.Dir.cwd().realPathFileAlloc(
+        std.testing.io,
+        "tests/fixtures/zig_steps_project",
+        allocator,
+    );
+
+    const tasks = try detectTasks(allocator, std.testing.io, root, "missing.json");
+
+    try std.testing.expectEqual(@as(usize, 4), tasks.len);
+    try std.testing.expectEqualStrings("zig-build", tasks[0].id);
+    try std.testing.expectEqualStrings("zig-test", tasks[1].id);
+    try std.testing.expectEqualStrings("zig-fmt", tasks[2].id);
+    try std.testing.expectEqualStrings("zig", tasks[2].argv[0]);
+    try std.testing.expectEqualStrings("build", tasks[2].argv[1]);
+    try std.testing.expectEqualStrings("fmt", tasks[2].argv[2]);
+    try std.testing.expectEqualStrings("zig-release-safe", tasks[3].id);
 }
 
 test "detect make tasks from phony targets" {
