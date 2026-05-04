@@ -6,6 +6,7 @@ pub const project = @import("core/project.zig");
 pub const config = @import("core/config.zig");
 pub const detect = @import("core/detect.zig");
 pub const runner = @import("core/runner.zig");
+pub const git = @import("core/git.zig");
 
 test {
     _ = version;
@@ -16,4 +17,5 @@ test {
     _ = config;
     _ = detect;
     _ = runner;
+    _ = git;
 }
