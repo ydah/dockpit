@@ -40,6 +40,13 @@ Run a task without starting the TUI:
 zig build run -- --run zig-build
 ```
 
+Print or clear recent run history:
+
+```sh
+zig build run -- --history --history-status failed --history-limit 10
+zig build run -- --clear-history
+```
+
 Disable Git status discovery:
 
 ```sh

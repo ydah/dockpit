@@ -23,6 +23,23 @@ pub fn main(init: std.process.Init) !void {
         return;
     }
 
+    if (options.clear_history or options.history) {
+        const project_root = try dockpit.project.discoverRoot(arena, init.io, options.project_dir orelse ".");
+        if (options.clear_history) {
+            try dockpit.history.clear(arena, init.io, project_root);
+            if (!options.history) {
+                try printLine(init.io, "history cleared");
+                return;
+            }
+        }
+        const entries = try dockpit.history.loadRecentFiltered(arena, init.io, project_root, options.history_limit, .{
+            .task_id = options.history_task_id,
+            .status = historyStatus(options.history_status),
+        });
+        try printHistory(init.io, project_root, entries);
+        return;
+    }
+
     if (options.run_task_id) |task_id| {
         const project_root = try dockpit.project.discoverRoot(arena, init.io, options.project_dir orelse ".");
         const tasks = try detectTasks(arena, init.io, project_root, options.config_path, options.strict_config);
@@ -76,6 +93,11 @@ fn printHelp(io: std.Io) !void {
         \\  --config <path>       Config path. Defaults to .dockpit.json.
         \\  --print-tasks         Print detected tasks and exit.
         \\  --run <task-id>       Run a task without starting the TUI.
+        \\  --history             Print recent run history and exit.
+        \\  --history-task <id>   Filter history to one task id.
+        \\  --history-status <s>  Filter history: all, success, failed, signal.
+        \\  --history-limit <n>   Limit history rows. Defaults to 20.
+        \\  --clear-history       Clear stored run history.
         \\  --no-git              Disable Git status discovery.
         \\  --strict-config       Fail instead of falling back on invalid config.
         \\  --help                Show this help.
@@ -96,6 +118,15 @@ fn detectTasks(
         dockpit.detect.detectTasksStrict(allocator, io, project_root, config_path)
     else
         dockpit.detect.detectTasks(allocator, io, project_root, config_path);
+}
+
+fn historyStatus(status: dockpit.cli.HistoryStatus) dockpit.history.Status {
+    return switch (status) {
+        .all => .all,
+        .success => .success,
+        .failed => .failed,
+        .signal => .signal,
+    };
 }
 
 fn printTasks(io: std.Io, project_root: []const u8, tasks: []const dockpit.task.TaskSpec) !void {
@@ -120,6 +151,36 @@ fn printTasks(io: std.Io, project_root: []const u8, tasks: []const dockpit.task.
         try stdout.writeAll("(no tasks detected)\n");
     }
 
+    try stdout.flush();
+}
+
+fn printHistory(io: std.Io, project_root: []const u8, entries: []const dockpit.history.Entry) !void {
+    var buffer: [4096]u8 = undefined;
+    var stdout_file_writer: Io.File.Writer = .init(.stdout(), io, &buffer);
+    const stdout = &stdout_file_writer.interface;
+
+    try stdout.print("project: {s}\n", .{project_root});
+    try stdout.writeAll("timestamp_ms       task               status   elapsed_ms\n");
+    try stdout.writeAll("-----------------  -----------------  -------  ----------\n");
+    for (entries) |entry| {
+        try stdout.print("{d:<17}  {s:<17}  {s:<7}  {d}\n", .{
+            entry.timestamp_ms,
+            entry.task_id,
+            entry.status().label(),
+            entry.elapsed_ms,
+        });
+    }
+    if (entries.len == 0) {
+        try stdout.writeAll("(no history)\n");
+    }
+    try stdout.flush();
+}
+
+fn printLine(io: std.Io, line: []const u8) !void {
+    var buffer: [256]u8 = undefined;
+    var stdout_file_writer: Io.File.Writer = .init(.stdout(), io, &buffer);
+    const stdout = &stdout_file_writer.interface;
+    try stdout.print("{s}\n", .{line});
     try stdout.flush();
 }
 

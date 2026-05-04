@@ -8,6 +8,40 @@ pub const Entry = struct {
     task_id: []const u8,
     exit_code: ?u8,
     elapsed_ms: u64,
+
+    pub fn status(self: Entry) Status {
+        if (self.exit_code) |code| return if (code == 0) .success else .failed;
+        return .signal;
+    }
+};
+
+pub const Status = enum {
+    all,
+    success,
+    failed,
+    signal,
+
+    pub fn label(status: Status) []const u8 {
+        return switch (status) {
+            .all => "all",
+            .success => "success",
+            .failed => "failed",
+            .signal => "signal",
+        };
+    }
+};
+
+pub const Filter = struct {
+    task_id: ?[]const u8 = null,
+    status: Status = .all,
+
+    pub fn matches(self: Filter, entry: Entry) bool {
+        if (self.task_id) |task_id| {
+            if (!std.mem.eql(u8, task_id, entry.task_id)) return false;
+        }
+        if (self.status == .all) return true;
+        return entry.status() == self.status;
+    }
 };
 
 const DiskEntry = struct {
@@ -67,6 +101,16 @@ pub fn loadRecent(
     project_root: []const u8,
     limit: usize,
 ) ![]Entry {
+    return loadRecentFiltered(allocator, io, project_root, limit, .{});
+}
+
+pub fn loadRecentFiltered(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    project_root: []const u8,
+    limit: usize,
+    filter: Filter,
+) ![]Entry {
     if (limit == 0) return allocator.alloc(Entry, 0);
 
     const path = try historyPath(allocator, project_root);
@@ -92,19 +136,36 @@ pub fn loadRecent(
         var parsed = std.json.parseFromSlice(DiskEntry, allocator, line, .{}) catch continue;
         defer parsed.deinit();
 
+        const entry = Entry{
+            .timestamp_ms = parsed.value.timestamp_ms,
+            .task_id = parsed.value.task_id,
+            .exit_code = parsed.value.exit_code,
+            .elapsed_ms = parsed.value.elapsed_ms,
+        };
+        if (!filter.matches(entry)) continue;
+
         if (entries.items.len == limit) {
             freeEntry(allocator, entries.orderedRemove(0));
         }
 
         try entries.append(allocator, .{
-            .timestamp_ms = parsed.value.timestamp_ms,
+            .timestamp_ms = entry.timestamp_ms,
             .task_id = try allocator.dupe(u8, parsed.value.task_id),
-            .exit_code = parsed.value.exit_code,
-            .elapsed_ms = parsed.value.elapsed_ms,
+            .exit_code = entry.exit_code,
+            .elapsed_ms = entry.elapsed_ms,
         });
     }
 
     return entries.toOwnedSlice(allocator);
+}
+
+pub fn clear(allocator: std.mem.Allocator, io: std.Io, project_root: []const u8) !void {
+    const path = try historyPath(allocator, project_root);
+    defer allocator.free(path);
+    std.Io.Dir.cwd().deleteFile(io, path) catch |err| switch (err) {
+        error.FileNotFound, error.NotDir => return,
+        else => |e| return e,
+    };
 }
 
 pub fn loadLatestTaskId(
@@ -184,4 +245,63 @@ test "history returns the latest task id" {
 
     const task_id = (try loadLatestTaskId(allocator, std.testing.io, root)).?;
     try std.testing.expectEqualStrings("new", task_id);
+}
+
+test "history filters by task and status" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    const root = try std.fmt.allocPrint(allocator, ".zig-cache/tmp/{s}", .{tmp.sub_path});
+
+    try appendEntry(allocator, std.testing.io, root, .{
+        .timestamp_ms = 1,
+        .task_id = "build",
+        .exit_code = 0,
+        .elapsed_ms = 10,
+    });
+    try appendEntry(allocator, std.testing.io, root, .{
+        .timestamp_ms = 2,
+        .task_id = "test",
+        .exit_code = 1,
+        .elapsed_ms = 20,
+    });
+    try appendEntry(allocator, std.testing.io, root, .{
+        .timestamp_ms = 3,
+        .task_id = "test",
+        .exit_code = 0,
+        .elapsed_ms = 30,
+    });
+
+    const entries = try loadRecentFiltered(allocator, std.testing.io, root, 8, .{
+        .task_id = "test",
+        .status = .failed,
+    });
+
+    try std.testing.expectEqual(@as(usize, 1), entries.len);
+    try std.testing.expectEqualStrings("test", entries[0].task_id);
+    try std.testing.expectEqual(@as(?u8, 1), entries[0].exit_code);
+}
+
+test "history clear removes stored entries" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    const root = try std.fmt.allocPrint(allocator, ".zig-cache/tmp/{s}", .{tmp.sub_path});
+
+    try appendEntry(allocator, std.testing.io, root, .{
+        .timestamp_ms = 1,
+        .task_id = "build",
+        .exit_code = 0,
+        .elapsed_ms = 10,
+    });
+
+    try clear(allocator, std.testing.io, root);
+    const entries = try loadRecent(allocator, std.testing.io, root, 8);
+    try std.testing.expectEqual(@as(usize, 0), entries.len);
 }
