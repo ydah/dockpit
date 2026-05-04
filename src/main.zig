@@ -1,12 +1,59 @@
 const std = @import("std");
 const Io = std.Io;
 
+const dockpit = @import("dockpit");
+
 pub fn main(init: std.process.Init) !void {
+    const arena = init.arena.allocator();
+    const args = try init.minimal.args.toSlice(arena);
+    const options = dockpit.cli.parse(args) catch |err| {
+        std.debug.print("dockpit: {s}\n\n", .{@errorName(err)});
+        printHelp(init.io) catch {};
+        return err;
+    };
+
+    if (options.help) {
+        try printHelp(init.io);
+        return;
+    }
+    if (options.version) {
+        try printVersion(init.io);
+        return;
+    }
+
     const io = init.io;
     var buffer: [1024]u8 = undefined;
     var stdout_file_writer: Io.File.Writer = .init(.stdout(), io, &buffer);
     const stdout = &stdout_file_writer.interface;
 
-    try stdout.writeAll("dockpit\n");
+    try stdout.writeAll("dockpit: no mode selected yet\n");
+    try stdout.flush();
+}
+
+fn printVersion(io: std.Io) !void {
+    var buffer: [128]u8 = undefined;
+    var stdout_file_writer: Io.File.Writer = .init(.stdout(), io, &buffer);
+    const stdout = &stdout_file_writer.interface;
+    try stdout.print("dockpit {s}\n", .{dockpit.version});
+    try stdout.flush();
+}
+
+fn printHelp(io: std.Io) !void {
+    var buffer: [2048]u8 = undefined;
+    var stdout_file_writer: Io.File.Writer = .init(.stdout(), io, &buffer);
+    const stdout = &stdout_file_writer.interface;
+    try stdout.writeAll(
+        \\Usage: dockpit [options]
+        \\
+        \\Options:
+        \\  --project-dir <path>  Project directory. Defaults to current directory.
+        \\  --config <path>       Config path. Defaults to .dockpit.json.
+        \\  --print-tasks         Print detected tasks and exit.
+        \\  --run <task-id>       Run a task without starting the TUI.
+        \\  --no-git              Disable Git status discovery.
+        \\  --help                Show this help.
+        \\  --version             Show version.
+        \\
+    );
     try stdout.flush();
 }
