@@ -49,11 +49,21 @@ jobs:
       - name: Build ReleaseSafe
         run: zig build -Doptimize=ReleaseSafe
 
+      - name: Check Release Artifact
+        run: test -x zig-out/bin/dockpit
+
       - name: Smoke Print Tasks
         run: zig build run -- --print-tasks
 
+      - name: Smoke Print Tasks JSON
+        run: |
+          zig build run -- --project-dir tests/fixtures/workspace_project --print-tasks --json | grep '"pnpm-dockpit-app-dev"'
+
       - name: Smoke Fixture Detection
         run: zig build run -- --project-dir tests/fixtures/pnpm_project --print-tasks
+
+      - name: Smoke History JSON
+        run: zig build run -- --project-dir tests/fixtures/config_project --history --json
 
       - name: Smoke No Git Project
         run: |
@@ -70,8 +80,18 @@ jobs:
             exit 1
           fi
 
+      - name: Smoke Config Validation Failure
+        run: |
+          if zig build run -- --project-dir tests/fixtures/config_project --config duplicate_task.json --strict-config --print-tasks; then
+            echo "duplicate task config unexpectedly succeeded"
+            exit 1
+          fi
+
       - name: Smoke Help
         run: zig build run -- --help
+
+      - name: Smoke Version
+        run: zig build run -- --version
 
       - name: Smoke Run Task
         run: zig build run -- --run zig-build
