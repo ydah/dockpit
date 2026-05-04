@@ -1,0 +1,7 @@
+{
+  "name": "@dockpit/app",
+  "scripts": {
+    "dev": "vite",
+    "test": "vitest"
+  }
+}

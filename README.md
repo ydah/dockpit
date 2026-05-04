@@ -26,6 +26,7 @@ Print detected tasks without starting the TUI:
 
 ```sh
 zig build run -- --print-tasks
+zig build run -- --print-tasks --json
 ```
 
 Use a different project directory:
@@ -44,6 +45,7 @@ Print or clear recent run history:
 
 ```sh
 zig build run -- --history --history-status failed --history-limit 10
+zig build run -- --history --json
 zig build run -- --clear-history
 ```
 
@@ -134,6 +136,7 @@ Configured task ids must be unique, only one task can set `default: true`, and k
 | `Makefile` / `makefile` | `.PHONY` targets or simple targets |
 | `justfile` / `Justfile` | simple recipes without arguments |
 | `package.json` | package scripts via `npm`, `pnpm`, `yarn`, or `bun`, inferred from `packageManager` or lockfiles |
+| npm/pnpm/yarn workspaces | workspace package scripts with each package directory as `cwd` |
 | `deno.json` / `deno.jsonc` | `deno task <name>` |
 | `Cargo.toml` | `cargo build`, `cargo test`, `cargo run` |
 | `go.mod` | `go test ./...`, `go build ./...`, `go run .` |

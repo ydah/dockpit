@@ -36,7 +36,11 @@ pub fn main(init: std.process.Init) !void {
             .task_id = options.history_task_id,
             .status = historyStatus(options.history_status),
         });
-        try printHistory(init.io, project_root, entries);
+        if (options.json) {
+            try printHistoryJson(init.io, project_root, entries);
+        } else {
+            try printHistory(init.io, project_root, entries);
+        }
         return;
     }
 
@@ -58,7 +62,11 @@ pub fn main(init: std.process.Init) !void {
     } else if (options.print_tasks) {
         const project_root = try dockpit.project.discoverRoot(arena, init.io, options.project_dir orelse ".");
         const tasks = try detectTasks(arena, init.io, project_root, options.config_path, options.strict_config);
-        try printTasks(init.io, project_root, tasks);
+        if (options.json) {
+            try printTasksJson(init.io, project_root, tasks);
+        } else {
+            try printTasks(init.io, project_root, tasks);
+        }
         return;
     }
 
@@ -92,6 +100,7 @@ fn printHelp(io: std.Io) !void {
         \\  --project-dir <path>  Project directory. Defaults to current directory.
         \\  --config <path>       Config path. Defaults to .dockpit.json.
         \\  --print-tasks         Print detected tasks and exit.
+        \\  --json                Print machine-readable JSON for list commands.
         \\  --run <task-id>       Run a task without starting the TUI.
         \\  --history             Print recent run history and exit.
         \\  --history-task <id>   Filter history to one task id.
@@ -154,6 +163,35 @@ fn printTasks(io: std.Io, project_root: []const u8, tasks: []const dockpit.task.
     try stdout.flush();
 }
 
+fn printTasksJson(io: std.Io, project_root: []const u8, tasks: []const dockpit.task.TaskSpec) !void {
+    var buffer: [4096]u8 = undefined;
+    var stdout_file_writer: Io.File.Writer = .init(.stdout(), io, &buffer);
+    const stdout = &stdout_file_writer.interface;
+
+    try stdout.writeAll("{\"project\":");
+    try std.json.Stringify.value(project_root, .{}, stdout);
+    try stdout.writeAll(",\"tasks\":[");
+    for (tasks, 0..) |item, index| {
+        if (index > 0) try stdout.writeByte(',');
+        try stdout.writeAll("{\"id\":");
+        try std.json.Stringify.value(item.id, .{}, stdout);
+        try stdout.writeAll(",\"label\":");
+        try std.json.Stringify.value(item.label, .{}, stdout);
+        try stdout.writeAll(",\"source\":");
+        try std.json.Stringify.value(item.source.label(), .{}, stdout);
+        try stdout.writeAll(",\"cwd\":");
+        try std.json.Stringify.value(item.cwd, .{}, stdout);
+        try stdout.writeAll(",\"argv\":[");
+        for (item.argv, 0..) |arg, arg_index| {
+            if (arg_index > 0) try stdout.writeByte(',');
+            try std.json.Stringify.value(arg, .{}, stdout);
+        }
+        try stdout.writeAll("]}");
+    }
+    try stdout.writeAll("]}\n");
+    try stdout.flush();
+}
+
 fn printHistory(io: std.Io, project_root: []const u8, entries: []const dockpit.history.Entry) !void {
     var buffer: [4096]u8 = undefined;
     var stdout_file_writer: Io.File.Writer = .init(.stdout(), io, &buffer);
@@ -173,6 +211,31 @@ fn printHistory(io: std.Io, project_root: []const u8, entries: []const dockpit.h
     if (entries.len == 0) {
         try stdout.writeAll("(no history)\n");
     }
+    try stdout.flush();
+}
+
+fn printHistoryJson(io: std.Io, project_root: []const u8, entries: []const dockpit.history.Entry) !void {
+    var buffer: [4096]u8 = undefined;
+    var stdout_file_writer: Io.File.Writer = .init(.stdout(), io, &buffer);
+    const stdout = &stdout_file_writer.interface;
+
+    try stdout.writeAll("{\"project\":");
+    try std.json.Stringify.value(project_root, .{}, stdout);
+    try stdout.writeAll(",\"history\":[");
+    for (entries, 0..) |entry, index| {
+        if (index > 0) try stdout.writeByte(',');
+        try stdout.print("{{\"timestamp_ms\":{d},\"task_id\":", .{entry.timestamp_ms});
+        try std.json.Stringify.value(entry.task_id, .{}, stdout);
+        try stdout.writeAll(",\"status\":");
+        try std.json.Stringify.value(entry.status().label(), .{}, stdout);
+        if (entry.exit_code) |code| {
+            try stdout.print(",\"exit_code\":{d}", .{code});
+        } else {
+            try stdout.writeAll(",\"exit_code\":null");
+        }
+        try stdout.print(",\"elapsed_ms\":{d}}}", .{entry.elapsed_ms});
+    }
+    try stdout.writeAll("]}\n");
     try stdout.flush();
 }
 

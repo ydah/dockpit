@@ -17,6 +17,7 @@ pub const Options = struct {
     project_dir: ?[]const u8 = null,
     config_path: []const u8 = ".dockpit.json",
     print_tasks: bool = false,
+    json: bool = false,
     run_task_id: ?[]const u8 = null,
     history: bool = false,
     clear_history: bool = false,
@@ -42,6 +43,8 @@ pub fn parse(args: []const []const u8) CliError!Options {
             options.version = true;
         } else if (std.mem.eql(u8, arg, "--print-tasks")) {
             options.print_tasks = true;
+        } else if (std.mem.eql(u8, arg, "--json")) {
+            options.json = true;
         } else if (std.mem.eql(u8, arg, "--history")) {
             options.history = true;
         } else if (std.mem.eql(u8, arg, "--clear-history")) {
@@ -97,6 +100,7 @@ test "parse default options" {
     try std.testing.expectEqual(@as(?[]const u8, null), options.project_dir);
     try std.testing.expectEqualStrings(".dockpit.json", options.config_path);
     try std.testing.expect(!options.print_tasks);
+    try std.testing.expect(!options.json);
     try std.testing.expect(!options.history);
     try std.testing.expect(!options.clear_history);
     try std.testing.expectEqual(@as(usize, 20), options.history_limit);
@@ -112,6 +116,7 @@ test "parse supported flags and values" {
         "--config",
         "tasks.json",
         "--print-tasks",
+        "--json",
         "--run",
         "zig-build",
         "--history",
@@ -130,6 +135,7 @@ test "parse supported flags and values" {
     try std.testing.expectEqualStrings("sample", options.project_dir.?);
     try std.testing.expectEqualStrings("tasks.json", options.config_path);
     try std.testing.expect(options.print_tasks);
+    try std.testing.expect(options.json);
     try std.testing.expectEqualStrings("zig-build", options.run_task_id.?);
     try std.testing.expect(options.history);
     try std.testing.expectEqualStrings("zig-test", options.history_task_id.?);

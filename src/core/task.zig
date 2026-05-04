@@ -60,6 +60,7 @@ pub const TaskSpec = struct {
     watch: bool = true,
 
     pub fn commandEquals(a: TaskSpec, b: TaskSpec) bool {
+        if (!std.mem.eql(u8, a.cwd, b.cwd)) return false;
         if (a.argv.len != b.argv.len) return false;
 
         for (a.argv, b.argv) |a_arg, b_arg| {
