@@ -66,6 +66,7 @@ const RootWidget = struct {
         for (self.jobs.items) |job| {
             if (!job.done.load(.acquire)) job.cancel_requested.store(true, .release);
             job.thread.join();
+            job.deinit();
             self.allocator.destroy(job);
         }
         self.jobs.deinit(self.allocator);
@@ -294,6 +295,7 @@ const RootWidget = struct {
     }
 
     fn handleTick(self: *RootWidget, ctx: *vxfw.EventContext) !void {
+        try self.drainJobEvents();
         try self.finishCompletedJobs();
         try self.pollWatch(ctx);
         if (self.runningJobCount() > 0) {
@@ -363,6 +365,7 @@ const RootWidget = struct {
         var index: usize = 0;
         while (index < self.jobs.items.len) {
             const job = self.jobs.items[index];
+            try self.drainJobEvent(job, false);
             if (!job.done.load(.acquire)) {
                 index += 1;
                 continue;
@@ -374,7 +377,11 @@ const RootWidget = struct {
 
     fn finishJob(self: *RootWidget, job: *RunningJob) !void {
         job.thread.join();
-        defer self.allocator.destroy(job);
+        defer {
+            job.deinit();
+            self.allocator.destroy(job);
+        }
+        try self.drainJobEvent(job, true);
 
         if (job.err_name) |err_name| {
             try self.state.log.push(.stderr, err_name, timestampMs(self.io));
@@ -386,12 +393,10 @@ const RootWidget = struct {
         history.appendRun(self.allocator, self.io, self.state.project_root, job.task_spec, result) catch {
             try self.state.log.push(.stderr, "failed to write history", timestampMs(self.io));
         };
-        try appendOutputLines(&self.state.log, .stdout, result.stdout, self.io);
-        try appendOutputLines(&self.state.log, .stderr, result.stderr, self.io);
         try self.appendFailureSummary(result);
 
         const status = if (job.cancel_requested.load(.acquire))
-            "cancel requested"
+            "cancelled"
         else if (result.exitCode()) |code|
             try std.fmt.allocPrint(self.allocator, "exit {d}", .{code})
         else
@@ -411,6 +416,36 @@ const RootWidget = struct {
             return;
         }
         self.state.dispatch(.{ .set_status = "no running task" });
+    }
+
+    fn drainJobEvents(self: *RootWidget) !void {
+        for (self.jobs.items) |job| {
+            try self.drainJobEvent(job, false);
+        }
+    }
+
+    fn drainJobEvent(self: *RootWidget, job: *RunningJob, flush: bool) !void {
+        job.mutex.lockUncancelable(self.io);
+        defer job.mutex.unlock(self.io);
+
+        for (job.events.items) |event| {
+            const kind: log_buffer.LogKind = switch (event.kind) {
+                .stdout => .stdout,
+                .stderr => .stderr,
+            };
+            const pending = switch (event.kind) {
+                .stdout => &job.pending_stdout,
+                .stderr => &job.pending_stderr,
+            };
+            try appendStreamBytes(&self.state.log, kind, pending, event.bytes, self.allocator, self.io);
+            self.allocator.free(event.bytes);
+        }
+        job.events.clearRetainingCapacity();
+
+        if (flush) {
+            try flushPendingLine(&self.state.log, .stdout, &job.pending_stdout, self.io);
+            try flushPendingLine(&self.state.log, .stderr, &job.pending_stderr, self.io);
+        }
     }
 
     fn appendFailureSummary(self: *RootWidget, result: runner.RunResult) !void {
@@ -623,18 +658,64 @@ const RunningJob = struct {
     thread: std.Thread = undefined,
     done: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
     cancel_requested: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
+    mutex: std.Io.Mutex = .init,
+    events: std.ArrayList(StreamEvent) = .empty,
+    pending_stdout: std.ArrayList(u8) = .empty,
+    pending_stderr: std.ArrayList(u8) = .empty,
     result: ?runner.RunResult = null,
     err_name: ?[]const u8 = null,
 
     fn run(job: *RunningJob) void {
-        job.result = runner.runTask(job.allocator, job.io, job.task_spec, job.env_map) catch |err| {
+        job.result = runner.runTaskStreaming(
+            job.allocator,
+            job.io,
+            job.task_spec,
+            job.env_map,
+            &job.cancel_requested,
+            job,
+            onStreamOutput,
+        ) catch |err| {
             job.err_name = @errorName(err);
             job.done.store(true, .release);
             return;
         };
         job.done.store(true, .release);
     }
+
+    fn deinit(job: *RunningJob) void {
+        job.mutex.lockUncancelable(job.io);
+        defer job.mutex.unlock(job.io);
+
+        for (job.events.items) |event| {
+            job.allocator.free(event.bytes);
+        }
+        job.events.deinit(job.allocator);
+        job.pending_stdout.deinit(job.allocator);
+        job.pending_stderr.deinit(job.allocator);
+    }
+
+    fn pushEvent(job: *RunningJob, kind: runner.StreamKind, bytes: []const u8) !void {
+        const owned = try job.allocator.dupe(u8, bytes);
+        errdefer job.allocator.free(owned);
+
+        job.mutex.lockUncancelable(job.io);
+        defer job.mutex.unlock(job.io);
+        try job.events.append(job.allocator, .{
+            .kind = kind,
+            .bytes = owned,
+        });
+    }
 };
+
+const StreamEvent = struct {
+    kind: runner.StreamKind,
+    bytes: []const u8,
+};
+
+fn onStreamOutput(context: *anyopaque, kind: runner.StreamKind, bytes: []const u8) !void {
+    const job: *RunningJob = @ptrCast(@alignCast(context));
+    try job.pushEvent(kind, bytes);
+}
 
 fn formatCommand(allocator: std.mem.Allocator, argv: []const []const u8) ![]const u8 {
     var command: std.ArrayList(u8) = .empty;
@@ -649,20 +730,35 @@ fn formatCommand(allocator: std.mem.Allocator, argv: []const []const u8) ![]cons
     return command.toOwnedSlice(allocator);
 }
 
-fn appendOutputLines(
+fn appendStreamBytes(
     log: *log_buffer.LogBuffer,
     kind: log_buffer.LogKind,
-    contents: []const u8,
+    pending: *std.ArrayList(u8),
+    bytes: []const u8,
+    allocator: std.mem.Allocator,
     io: std.Io,
 ) !void {
-    if (contents.len == 0) return;
+    if (bytes.len == 0) return;
 
-    var lines = std.mem.splitScalar(u8, contents, '\n');
-    while (lines.next()) |raw_line| {
-        const line = std.mem.trim(u8, raw_line, "\r");
-        if (line.len == 0) continue;
-        try log.push(kind, line, timestampMs(io));
+    var start: usize = 0;
+    for (bytes, 0..) |byte, index| {
+        if (byte != '\n') continue;
+        try pending.appendSlice(allocator, bytes[start..index]);
+        try flushPendingLine(log, kind, pending, io);
+        start = index + 1;
     }
+    if (start < bytes.len) try pending.appendSlice(allocator, bytes[start..]);
+}
+
+fn flushPendingLine(
+    log: *log_buffer.LogBuffer,
+    kind: log_buffer.LogKind,
+    pending: *std.ArrayList(u8),
+    io: std.Io,
+) !void {
+    const line = std.mem.trim(u8, pending.items, "\r");
+    if (line.len > 0) try log.push(kind, line, timestampMs(io));
+    pending.clearRetainingCapacity();
 }
 
 fn timestampMs(io: std.Io) u64 {
@@ -728,4 +824,22 @@ test "key binding matcher handles named and ctrl keys" {
     try std.testing.expect(matchesBinding(.{ .codepoint = 'r', .mods = .{ .ctrl = true } }, "ctrl+r"));
     try std.testing.expect(matchesBinding(.{ .codepoint = ':' }, ":"));
     try std.testing.expect(!matchesBinding(.{ .codepoint = 'r' }, "ctrl+r"));
+}
+
+test "stream log chunks keep partial lines together" {
+    var log = log_buffer.LogBuffer.init(std.testing.allocator, 10);
+    defer log.deinit();
+    var pending: std.ArrayList(u8) = .empty;
+    defer pending.deinit(std.testing.allocator);
+
+    try appendStreamBytes(&log, .stdout, &pending, "hel", std.testing.allocator, std.testing.io);
+    try std.testing.expectEqual(@as(usize, 0), log.items().len);
+
+    try appendStreamBytes(&log, .stdout, &pending, "lo\nnext", std.testing.allocator, std.testing.io);
+    try std.testing.expectEqual(@as(usize, 1), log.items().len);
+    try std.testing.expectEqualStrings("hello", log.items()[0].text);
+
+    try flushPendingLine(&log, .stdout, &pending, std.testing.io);
+    try std.testing.expectEqual(@as(usize, 2), log.items().len);
+    try std.testing.expectEqualStrings("next", log.items()[1].text);
 }
