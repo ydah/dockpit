@@ -5,6 +5,7 @@ const vxfw = vaxis.vxfw;
 const app_state = @import("../core/app_state.zig");
 const config = @import("../core/config.zig");
 const failures = @import("../core/failures.zig");
+const fuzzy = @import("../core/fuzzy.zig");
 const git = @import("../core/git.zig");
 const history = @import("../core/history.zig");
 const log_buffer = @import("../core/log_buffer.zig");
@@ -67,6 +68,7 @@ const RootWidget = struct {
     selected_history_index: usize = 0,
     selected_change_index: usize = 0,
     palette_index: usize = 0,
+    palette_query: std.ArrayList(u8) = .empty,
     watch_enabled: bool = false,
     watch_snapshot: ?watch.Snapshot = null,
     last_watch_ms: u64 = 0,
@@ -80,6 +82,7 @@ const RootWidget = struct {
             self.allocator.destroy(job);
         }
         self.jobs.deinit(self.allocator);
+        self.palette_query.deinit(self.allocator);
         self.changed_files.deinit();
         self.freeHistoryEntries();
         self.allocator.free(self.task_statuses);
@@ -200,6 +203,11 @@ const RootWidget = struct {
                     ctx.consumeAndRedraw();
                     return;
                 }
+                if (matchesBinding(key, self.settings.keybindings.details)) {
+                    try self.showSelectedTaskDetails();
+                    ctx.consumeAndRedraw();
+                    return;
+                }
                 if (matchesBinding(key, self.settings.keybindings.watch)) {
                     try self.toggleWatch(ctx);
                     ctx.consumeAndRedraw();
@@ -226,6 +234,7 @@ const RootWidget = struct {
                     self.state.dispatch(.exit_mode);
                     self.state.mode = .palette;
                     self.palette_index = 0;
+                    self.palette_query.clearRetainingCapacity();
                     self.state.dispatch(.{ .set_status = "palette" });
                     ctx.consumeAndRedraw();
                 }
@@ -467,20 +476,39 @@ const RootWidget = struct {
             return true;
         }
         if (key.matches('j', .{}) or key.matches(vaxis.Key.down, .{})) {
-            self.palette_index = (self.palette_index + 1) % palette_commands.len;
+            self.selectNextPaletteCommand();
             ctx.consumeAndRedraw();
             return true;
         }
         if (key.matches('k', .{}) or key.matches(vaxis.Key.up, .{})) {
-            self.palette_index = if (self.palette_index == 0) palette_commands.len - 1 else self.palette_index - 1;
+            self.selectPreviousPaletteCommand();
+            ctx.consumeAndRedraw();
+            return true;
+        }
+        if (key.matches(vaxis.Key.backspace, .{})) {
+            if (self.palette_query.items.len > 0) _ = self.palette_query.pop();
+            self.clampPaletteSelection();
             ctx.consumeAndRedraw();
             return true;
         }
         if (key.matches(vaxis.Key.enter, .{})) {
-            try self.executePaletteCommand(ctx, palette_commands[self.palette_index].id);
+            const command = self.selectedPaletteCommand() orelse {
+                self.state.dispatch(.{ .set_status = "no command" });
+                ctx.consumeAndRedraw();
+                return true;
+            };
+            try self.executePaletteCommand(ctx, command.id);
             if (self.state.mode == .palette) self.state.dispatch(.exit_mode);
             ctx.consumeAndRedraw();
             return true;
+        }
+        if (!key.mods.ctrl and !key.mods.alt) {
+            if (key.text) |text| {
+                try self.palette_query.appendSlice(self.allocator, text);
+                self.clampPaletteSelection();
+                ctx.consumeAndRedraw();
+                return true;
+            }
         }
 
         return true;
@@ -497,6 +525,7 @@ const RootWidget = struct {
             .refresh_git => self.refreshGit(),
             .show_changes => try self.showChanges(),
             .show_worktrees => try self.showWorktrees(),
+            .show_task_details => try self.showSelectedTaskDetails(),
             .toggle_watch => try self.toggleWatch(ctx),
             .show_jobs => {
                 self.state.dispatch(.exit_mode);
@@ -523,6 +552,56 @@ const RootWidget = struct {
                 ctx.quit = true;
             },
         }
+    }
+
+    fn selectedPaletteCommand(self: *RootWidget) ?PaletteCommand {
+        var visible_index: usize = 0;
+        for (palette_commands) |command| {
+            if (!self.paletteCommandVisible(command)) continue;
+            if (visible_index == self.palette_index) return command;
+            visible_index += 1;
+        }
+        return null;
+    }
+
+    fn paletteCommandVisible(self: *RootWidget, command: PaletteCommand) bool {
+        if (self.palette_query.items.len == 0) return true;
+        return fuzzy.matches(self.palette_query.items, command.label);
+    }
+
+    fn visiblePaletteCommandCount(self: *RootWidget) usize {
+        var count: usize = 0;
+        for (palette_commands) |command| {
+            if (self.paletteCommandVisible(command)) count += 1;
+        }
+        return count;
+    }
+
+    fn clampPaletteSelection(self: *RootWidget) void {
+        const count = self.visiblePaletteCommandCount();
+        if (count == 0) {
+            self.palette_index = 0;
+            return;
+        }
+        self.palette_index = @min(self.palette_index, count - 1);
+    }
+
+    fn selectNextPaletteCommand(self: *RootWidget) void {
+        const count = self.visiblePaletteCommandCount();
+        if (count == 0) {
+            self.palette_index = 0;
+            return;
+        }
+        self.palette_index = (self.palette_index + 1) % count;
+    }
+
+    fn selectPreviousPaletteCommand(self: *RootWidget) void {
+        const count = self.visiblePaletteCommandCount();
+        if (count == 0) {
+            self.palette_index = 0;
+            return;
+        }
+        self.palette_index = if (self.palette_index == 0) count - 1 else self.palette_index - 1;
     }
 
     fn startTask(self: *RootWidget, ctx: *vxfw.EventContext, selected: task.TaskSpec) !void {
@@ -887,7 +966,7 @@ const RootWidget = struct {
 
         self.clampSelectedChange();
         const item = self.changed_files.items[self.selected_change_index];
-        const diff = try git.diffPath(self.allocator, self.io, self.state.project_root, item.path, item.staged);
+        const diff = try git.diffChangedFile(self.allocator, self.io, self.state.project_root, item);
         defer self.allocator.free(diff);
 
         const title = try std.fmt.allocPrint(self.allocator, "Git diff: {s}", .{item.path});
@@ -929,6 +1008,33 @@ const RootWidget = struct {
             try self.state.log.push(.system, label, timestampMs(self.io));
         }
         self.state.dispatch(.{ .set_status = "worktrees shown" });
+    }
+
+    fn showSelectedTaskDetails(self: *RootWidget) !void {
+        const item = self.state.selectedTask() orelse {
+            self.state.dispatch(.{ .set_status = "no task selected" });
+            return;
+        };
+
+        try self.state.log.push(.system, "Task details", timestampMs(self.io));
+        try self.pushDetailLine("id", item.id);
+        try self.pushDetailLine("label", item.label);
+        try self.pushDetailLine("source", item.source.label());
+        if (item.group.len > 0) try self.pushDetailLine("group", item.group);
+        if (item.description.len > 0) try self.pushDetailLine("description", item.description);
+        try self.pushDetailLine("cwd", item.cwd);
+        const command = try formatCommand(self.allocator, item.argv);
+        defer self.allocator.free(command);
+        try self.pushDetailLine("command", command);
+        try self.pushDetailLine("watch", if (item.watch) "on" else "off");
+        self.state.focused_pane = .output;
+        self.state.dispatch(.{ .set_status = "task details" });
+    }
+
+    fn pushDetailLine(self: *RootWidget, label: []const u8, value: []const u8) !void {
+        const line = try std.fmt.allocPrint(self.allocator, "{s}: {s}", .{ label, value });
+        defer self.allocator.free(line);
+        try self.state.log.push(.system, line, timestampMs(self.io));
     }
 
     fn lastTask(self: *RootWidget) ?task.TaskSpec {
@@ -1085,12 +1191,28 @@ const RootWidget = struct {
         widgets.drawBox(surface, rect, "Command Palette");
         if (rect.height <= 2 or rect.width <= 4) return;
 
-        const max_rows = rect.height - 2;
-        for (palette_commands[0..@min(palette_commands.len, max_rows)], 0..) |command, index| {
-            const row: u16 = rect.y + 1 + @as(u16, @intCast(index));
-            const marker = if (index == self.palette_index) ">" else " ";
+        if (std.fmt.allocPrint(self.allocator, "filter: {s}", .{self.palette_query.items})) |query_line| {
+            defer self.allocator.free(query_line);
+            widgets.writeTextClipped(surface, rect.y + 1, rect.x + 2, query_line, rect.width - 4);
+        } else |_| {
+            widgets.writeTextClipped(surface, rect.y + 1, rect.x + 2, "filter", rect.width - 4);
+        }
+
+        const max_rows = if (rect.height > 3) rect.height - 3 else 0;
+        var visible_index: usize = 0;
+        var drawn: usize = 0;
+        for (palette_commands) |command| {
+            if (!self.paletteCommandVisible(command)) continue;
+            if (drawn >= max_rows) break;
+            const row: u16 = rect.y + 2 + @as(u16, @intCast(drawn));
+            const marker = if (visible_index == self.palette_index) ">" else " ";
             widgets.writeText(surface, row, rect.x + 2, marker);
             widgets.writeTextClipped(surface, row, rect.x + 4, command.label, rect.width - 4);
+            visible_index += 1;
+            drawn += 1;
+        }
+        if (drawn == 0) {
+            widgets.writeTextClipped(surface, rect.y + 2, rect.x + 2, "No matching commands", rect.width - 4);
         }
     }
 
@@ -1107,6 +1229,7 @@ const RootWidget = struct {
             "J  show running jobs",
             "h  show run history",
             "f  show Git changes; Space stage/unstage; Enter show diff",
+            "i  show selected task details",
             "r  rerun last task",
             "x  cancel newest running task",
             "w  toggle file-watch rerun",
@@ -1229,7 +1352,7 @@ const RootWidget = struct {
                 self.state.visibleLogCount(),
             }) catch "output search"
         else if (self.state.mode == .palette)
-            "palette: Enter run command  Esc close"
+            std.fmt.allocPrint(arena, "palette: {s}  Enter run  Esc close", .{self.palette_query.items}) catch "palette"
         else if (self.state.mode == .help)
             "help: Esc close"
         else if (self.state.mode == .jobs)
@@ -1247,7 +1370,7 @@ const RootWidget = struct {
         const status_line = std.fmt.allocPrint(arena, "{s}  status: {s}", .{ mode_line, status }) catch mode_line;
         widgets.writeTextClippedStyled(surface, rect.y + 1, rect.x + 2, status_line, rect.width - 4, statusStyle(self.settings.theme));
         if (rect.height > 2) {
-            widgets.writeTextClipped(surface, rect.y + 2, rect.x + 2, "Enter run / find : cmds J jobs h history f files Tab pane ? help w watch t trees r rerun x stop c clear g git q quit", rect.width - 4);
+            widgets.writeTextClipped(surface, rect.y + 2, rect.x + 2, "Enter run / find : cmds i info J jobs h history f files Tab pane ? help w watch t trees r rerun x stop c clear g git q quit", rect.width - 4);
         }
     }
 };
@@ -1275,6 +1398,7 @@ const PaletteCommandId = enum {
     refresh_git,
     show_changes,
     show_worktrees,
+    show_task_details,
     toggle_watch,
     show_jobs,
     show_history,
@@ -1294,6 +1418,7 @@ const palette_commands = [_]PaletteCommand{
     .{ .id = .refresh_git, .label = "Refresh Git status" },
     .{ .id = .show_changes, .label = "Show Git changes" },
     .{ .id = .show_worktrees, .label = "Show Git worktrees" },
+    .{ .id = .show_task_details, .label = "Show selected task details" },
     .{ .id = .toggle_watch, .label = "Toggle file watch" },
     .{ .id = .show_jobs, .label = "Show running jobs" },
     .{ .id = .show_history, .label = "Show run history" },

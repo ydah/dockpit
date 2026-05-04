@@ -77,6 +77,7 @@ zig build run -- --strict-config --print-tasks
 | `g` | Refresh Git status |
 | `f` | Show Git changes |
 | `t` | Show Git worktrees |
+| `i` | Show selected task details |
 | `J` | Show running jobs |
 | `h` | Show run history |
 | `w` | Toggle file-watch rerun |
@@ -123,7 +124,7 @@ Create `.dockpit.json` in the project root:
 
 `cmd` must be a non-empty argv array. `dockpit` does not run user-configured commands through a shell. Task metadata fields are optional: `description`, `group`, `default`, and `watch`.
 
-Configured task ids must be unique, only one task can set `default: true`, and keybindings cannot collide. Supported themes are `default`, `dark`, `light`, and `high-contrast`. Keybinding names include `run`, `rerun`, `cancel`, `clear`, `git`, `changes`, `worktrees`, `jobs`, `history`, `watch`, `search`, `palette`, `focus`, `help`, and `quit`.
+Configured task ids must be unique, only one task can set `default: true`, and keybindings cannot collide. Supported themes are `default`, `dark`, `light`, and `high-contrast`. Keybinding names include `run`, `rerun`, `cancel`, `clear`, `git`, `changes`, `worktrees`, `details`, `jobs`, `history`, `watch`, `search`, `palette`, `focus`, `help`, and `quit`.
 
 ## Auto Detection
 
@@ -152,7 +153,7 @@ Configured task ids must be unique, only one task can set `default: true`, and k
 - Multiple tasks can run concurrently in background threads.
 - TUI task output streams while tasks are running.
 - `x` requests cancellation and terminates the child process for running background tasks.
-- The Git changes view supports `Space` to stage or unstage the selected file and `Enter` to append a diff to output.
+- The Git changes view supports `Space` to stage or unstage the selected file and `Enter` to append a diff to output, including untracked files.
 - File watching uses a portable polling snapshot, honors each task's `watch` flag, and ignores generated directories such as `.git`, `.zig-cache`, `zig-out`, `node_modules`, `target`, and `.dockpit`.
 - Per-project run history is stored in `.dockpit/history.log`.
 - Interactive commands should be exposed as non-interactive tasks; dockpit does not allocate a PTY.

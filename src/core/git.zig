@@ -180,6 +180,16 @@ pub fn diffPath(
     return result.stdout;
 }
 
+pub fn diffChangedFile(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    project_root: []const u8,
+    item: ChangedFile,
+) ![]u8 {
+    if (item.state == .untracked) return untrackedDiff(allocator, io, project_root, item.path);
+    return diffPath(allocator, io, project_root, item.path, item.staged);
+}
+
 pub fn parseWorktreePorcelain(allocator: std.mem.Allocator, contents: []const u8) ![]Worktree {
     var items: std.ArrayList(Worktree) = .empty;
     errdefer {
@@ -331,6 +341,30 @@ fn runGitNoOutput(
     if (!isSuccess(result.term)) return error.GitCommandFailed;
 }
 
+fn untrackedDiff(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    project_root: []const u8,
+    path: []const u8,
+) ![]u8 {
+    const absolute_path = try std.fs.path.join(allocator, &.{ project_root, path });
+    defer allocator.free(absolute_path);
+
+    const contents = try std.Io.Dir.cwd().readFileAlloc(io, absolute_path, allocator, .limited(2 * 1024 * 1024));
+    defer allocator.free(contents);
+
+    var out: std.Io.Writer.Allocating = .init(allocator);
+    errdefer out.deinit();
+    try out.writer.print("--- /dev/null\n+++ b/{s}\n@@\n", .{path});
+    var lines = std.mem.splitScalar(u8, contents, '\n');
+    while (lines.next()) |line| {
+        try out.writer.writeByte('+');
+        try out.writer.writeAll(line);
+        try out.writer.writeByte('\n');
+    }
+    return out.toOwnedSlice();
+}
+
 fn isSuccess(term: std.process.Child.Term) bool {
     return switch (term) {
         .exited => |code| code == 0,
@@ -406,6 +440,24 @@ test "parse changed files from porcelain output" {
     try std.testing.expectEqualStrings("moved.txt", items[3].path);
     try std.testing.expectEqualStrings("old.txt", items[3].old_path);
     try std.testing.expectEqual(ChangeState.renamed, items[3].state);
+}
+
+test "untracked diff renders file contents" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    const root = try std.fmt.allocPrint(allocator, ".zig-cache/tmp/{s}", .{tmp.sub_path});
+    const path = try std.fmt.allocPrint(allocator, "{s}/new.txt", .{root});
+    try std.Io.Dir.cwd().writeFile(std.testing.io, .{ .sub_path = path, .data = "hello\n" });
+
+    const diff = try untrackedDiff(std.testing.allocator, std.testing.io, root, "new.txt");
+    defer std.testing.allocator.free(diff);
+
+    try std.testing.expect(std.mem.indexOf(u8, diff, "+++ b/new.txt") != null);
+    try std.testing.expect(std.mem.indexOf(u8, diff, "+hello") != null);
 }
 
 test "parse worktree porcelain output" {
