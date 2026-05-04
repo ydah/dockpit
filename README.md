@@ -54,14 +54,16 @@ zig build run -- --no-git
 | `j` / `Down` | Select next task |
 | `k` / `Up` | Select previous task |
 | `Enter` | Run selected task |
-| `/` | Fuzzy-search tasks |
+| `/` | Fuzzy-search tasks; with output focused, search output |
 | `:` | Open command palette |
 | `r` | Rerun the last task |
-| `x` | Request cancellation for the running task |
+| `x` | Cancel the newest running task |
 | `c` | Clear output |
 | `g` | Refresh Git status |
 | `t` | Show Git worktrees |
 | `w` | Toggle file-watch rerun |
+| `Tab` | Switch focus between tasks and output |
+| `?` | Show help |
 
 ## Configuration
 
@@ -95,7 +97,7 @@ Create `.dockpit.json` in the project root:
 
 `cmd` must be an argv array. `dockpit` does not run user-configured commands through a shell.
 
-Supported themes are `default`, `dark`, `light`, and `high-contrast`. Keybinding names include `run`, `rerun`, `cancel`, `clear`, `git`, `worktrees`, `watch`, `search`, `palette`, and `quit`.
+Supported themes are `default`, `dark`, `light`, and `high-contrast`. Keybinding names include `run`, `rerun`, `cancel`, `clear`, `git`, `worktrees`, `watch`, `search`, `palette`, `focus`, `help`, and `quit`.
 
 ## Auto Detection
 
@@ -104,7 +106,7 @@ Supported themes are `default`, `dark`, `light`, and `high-contrast`. Keybinding
 | File | Tasks |
 |---|---|
 | `.dockpit.json` | configured tasks |
-| `build.zig` | `zig build`, `zig build test` |
+| `build.zig` | `zig build`, `zig build test`, and simple `b.step("name", ...)` build steps |
 | `Makefile` / `makefile` | `.PHONY` targets or simple targets |
 | `justfile` / `Justfile` | simple recipes without arguments |
 | `package.json` | `npm run <script>` |
@@ -115,12 +117,11 @@ Supported themes are `default`, `dark`, `light`, and `high-contrast`. Keybinding
 ## Runtime Notes
 
 - Multiple tasks can run concurrently in background threads.
-- TUI task output is appended after each task exits.
-- `x` records a cancellation request safely; full process termination is still limited.
+- TUI task output streams while tasks are running.
+- `x` requests cancellation and terminates the child process for running background tasks.
 - File watching uses a portable polling snapshot and ignores generated directories such as `.git`, `.zig-cache`, `zig-out`, `node_modules`, `target`, and `.dockpit`.
 - Per-project run history is stored in `.dockpit/history.log`.
-- Interactive terminal commands are not fully emulated.
-- Windows support has not been hardened.
+- Interactive commands should be exposed as non-interactive tasks; dockpit does not allocate a PTY.
 
 ## Development
 

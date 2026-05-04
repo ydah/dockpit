@@ -51,3 +51,9 @@ jobs:
 
       - name: Smoke Print Tasks
         run: zig build run -- --print-tasks
+
+      - name: Smoke Help
+        run: zig build run -- --help
+
+      - name: Smoke Run Task
+        run: zig build run -- --run zig-build
