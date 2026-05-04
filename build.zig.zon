@@ -1,0 +1,16 @@
+.{
+    .name = .dockpit,
+    .version = "0.1.0",
+    .fingerprint = 0x9e247a0316449263, // Changing this has security and trust implications.
+    .minimum_zig_version = "0.16.0",
+    .dependencies = .{},
+    .paths = .{
+        "AGENTS.md",
+        "README.md",
+        "build.zig",
+        "build.zig.zon",
+        "docs",
+        "src",
+        "tests",
+    },
+}
