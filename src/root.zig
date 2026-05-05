@@ -1,5 +1,6 @@
 pub const version = "0.1.0";
 pub const cli = @import("cli.zig");
+pub const cli_output = @import("cli_output.zig");
 pub const task = @import("core/task.zig");
 pub const log_buffer = @import("core/log_buffer.zig");
 pub const project = @import("core/project.zig");
@@ -17,6 +18,7 @@ pub const tui = @import("ui/tui.zig");
 test {
     _ = version;
     _ = cli;
+    _ = cli_output;
     _ = task;
     _ = log_buffer;
     _ = project;

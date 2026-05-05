@@ -59,6 +59,10 @@ jobs:
         run: |
           zig build run -- --project-dir tests/fixtures/workspace_project --print-tasks --json | grep '"pnpm-dockpit-app-dev"'
 
+      - name: Smoke PNPM Workspace File
+        run: |
+          zig build run -- --project-dir tests/fixtures/pnpm_workspace_file_project --print-tasks --json | grep '"pnpm-dockpit-api-test"'
+
       - name: Smoke Fixture Detection
         run: zig build run -- --project-dir tests/fixtures/pnpm_project --print-tasks
 
@@ -84,6 +88,13 @@ jobs:
         run: |
           if zig build run -- --project-dir tests/fixtures/config_project --config duplicate_task.json --strict-config --print-tasks; then
             echo "duplicate task config unexpectedly succeeded"
+            exit 1
+          fi
+
+      - name: Smoke Config Version Failure
+        run: |
+          if zig build run -- --project-dir tests/fixtures/config_project --config unsupported_version.json --strict-config --print-tasks; then
+            echo "unsupported config version unexpectedly succeeded"
             exit 1
           fi
 

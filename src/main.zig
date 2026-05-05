@@ -1,5 +1,4 @@
 const std = @import("std");
-const Io = std.Io;
 
 pub const std_options: std.Options = .{ .log_level = .warn };
 
@@ -10,16 +9,16 @@ pub fn main(init: std.process.Init) !void {
     const args = try init.minimal.args.toSlice(arena);
     const options = dockpit.cli.parse(args) catch |err| {
         std.debug.print("dockpit: {s}\n\n", .{@errorName(err)});
-        printHelp(init.io) catch {};
+        dockpit.cli_output.printHelp(init.io) catch {};
         return err;
     };
 
     if (options.help) {
-        try printHelp(init.io);
+        try dockpit.cli_output.printHelp(init.io);
         return;
     }
     if (options.version) {
-        try printVersion(init.io);
+        try dockpit.cli_output.printVersion(init.io, dockpit.version);
         return;
     }
 
@@ -28,7 +27,7 @@ pub fn main(init: std.process.Init) !void {
         if (options.clear_history) {
             try dockpit.history.clear(arena, init.io, project_root);
             if (!options.history) {
-                try printLine(init.io, "history cleared");
+                try dockpit.cli_output.printLine(init.io, "history cleared");
                 return;
             }
         }
@@ -37,9 +36,9 @@ pub fn main(init: std.process.Init) !void {
             .status = historyStatus(options.history_status),
         });
         if (options.json) {
-            try printHistoryJson(init.io, project_root, entries);
+            try dockpit.cli_output.printHistoryJson(init.io, project_root, entries);
         } else {
-            try printHistory(init.io, project_root, entries);
+            try dockpit.cli_output.printHistory(init.io, project_root, entries);
         }
         return;
     }
@@ -47,14 +46,15 @@ pub fn main(init: std.process.Init) !void {
     if (options.run_task_id) |task_id| {
         const project_root = try dockpit.project.discoverRoot(arena, init.io, options.project_dir orelse ".");
         const tasks = try detectTasks(arena, init.io, project_root, options.config_path, options.strict_config);
+        try applyEnvOverrides(arena, tasks, options.envOverrides());
         const item = findTask(tasks, task_id) orelse {
             std.debug.print("dockpit: unknown task id '{s}'\n", .{task_id});
             std.process.exit(1);
         };
         const result = try dockpit.runner.runTask(arena, init.io, item, init.environ_map);
         dockpit.history.appendRun(arena, init.io, project_root, item, result) catch {};
-        try printRunResult(init.io, item, result);
-        try printFailures(init.io, arena, result);
+        try dockpit.cli_output.printRunResult(init.io, item, result);
+        try dockpit.cli_output.printFailures(init.io, arena, result);
         if (result.exitCode()) |code| {
             std.process.exit(code);
         }
@@ -63,15 +63,16 @@ pub fn main(init: std.process.Init) !void {
         const project_root = try dockpit.project.discoverRoot(arena, init.io, options.project_dir orelse ".");
         const tasks = try detectTasks(arena, init.io, project_root, options.config_path, options.strict_config);
         if (options.json) {
-            try printTasksJson(init.io, project_root, tasks);
+            try dockpit.cli_output.printTasksJson(init.io, project_root, tasks);
         } else {
-            try printTasks(init.io, project_root, tasks);
+            try dockpit.cli_output.printTasks(init.io, project_root, tasks);
         }
         return;
     }
 
     const project_root = try dockpit.project.discoverRoot(arena, init.io, options.project_dir orelse ".");
     const tasks = try detectTasks(arena, init.io, project_root, options.config_path, options.strict_config);
+    try applyEnvOverrides(arena, tasks, options.envOverrides());
     const settings = dockpit.config.loadSettings(arena, init.io, project_root, options.config_path) catch |err| settings: {
         if (options.strict_config) return err;
         std.debug.print("dockpit: ignoring invalid settings: {s}\n", .{@errorName(err)});
@@ -79,41 +80,6 @@ pub fn main(init: std.process.Init) !void {
     };
     const git_summary = if (options.no_git) dockpit.git.GitSummary.none() else dockpit.git.loadSummary(arena, init.io, project_root);
     try dockpit.tui.run(arena, init.io, init.environ_map, project_root, tasks, git_summary, !options.no_git, settings);
-}
-
-fn printVersion(io: std.Io) !void {
-    var buffer: [128]u8 = undefined;
-    var stdout_file_writer: Io.File.Writer = .init(.stdout(), io, &buffer);
-    const stdout = &stdout_file_writer.interface;
-    try stdout.print("dockpit {s}\n", .{dockpit.version});
-    try stdout.flush();
-}
-
-fn printHelp(io: std.Io) !void {
-    var buffer: [2048]u8 = undefined;
-    var stdout_file_writer: Io.File.Writer = .init(.stdout(), io, &buffer);
-    const stdout = &stdout_file_writer.interface;
-    try stdout.writeAll(
-        \\Usage: dockpit [options]
-        \\
-        \\Options:
-        \\  --project-dir <path>  Project directory. Defaults to current directory.
-        \\  --config <path>       Config path. Defaults to .dockpit.json.
-        \\  --print-tasks         Print detected tasks and exit.
-        \\  --json                Print machine-readable JSON for list commands.
-        \\  --run <task-id>       Run a task without starting the TUI.
-        \\  --history             Print recent run history and exit.
-        \\  --history-task <id>   Filter history to one task id.
-        \\  --history-status <s>  Filter history: all, success, failed, signal.
-        \\  --history-limit <n>   Limit history rows. Defaults to 20.
-        \\  --clear-history       Clear stored run history.
-        \\  --no-git              Disable Git status discovery.
-        \\  --strict-config       Fail instead of falling back on invalid config.
-        \\  --help                Show this help.
-        \\  --version             Show version.
-        \\
-    );
-    try stdout.flush();
 }
 
 fn detectTasks(
@@ -138,132 +104,48 @@ fn historyStatus(status: dockpit.cli.HistoryStatus) dockpit.history.Status {
     };
 }
 
-fn printTasks(io: std.Io, project_root: []const u8, tasks: []const dockpit.task.TaskSpec) !void {
-    var buffer: [4096]u8 = undefined;
-    var stdout_file_writer: Io.File.Writer = .init(.stdout(), io, &buffer);
-    const stdout = &stdout_file_writer.interface;
+fn applyEnvOverrides(
+    allocator: std.mem.Allocator,
+    tasks: []dockpit.task.TaskSpec,
+    overrides: []const []const u8,
+) !void {
+    if (overrides.len == 0) return;
 
-    try stdout.print("project: {s}\n", .{project_root});
-    try stdout.writeAll("id                 source  command\n");
-    try stdout.writeAll("-----------------  ------  -------\n");
+    for (tasks) |*item| {
+        const old_env = item.env;
+        const merged = try allocator.alloc(dockpit.task.EnvVar, old_env.len + overrides.len);
 
-    for (tasks) |item| {
-        try stdout.print("{s:<17}  {s:<6}  ", .{ item.id, item.source.label() });
-        for (item.argv, 0..) |arg, index| {
-            if (index > 0) try stdout.writeByte(' ');
-            try stdout.writeAll(arg);
+        var index: usize = 0;
+        errdefer {
+            for (merged[0..index]) |entry| {
+                allocator.free(entry.key);
+                allocator.free(entry.value);
+            }
+            allocator.free(merged);
         }
-        try stdout.writeByte('\n');
-    }
-
-    if (tasks.len == 0) {
-        try stdout.writeAll("(no tasks detected)\n");
-    }
-
-    try stdout.flush();
-}
-
-fn printTasksJson(io: std.Io, project_root: []const u8, tasks: []const dockpit.task.TaskSpec) !void {
-    var buffer: [4096]u8 = undefined;
-    var stdout_file_writer: Io.File.Writer = .init(.stdout(), io, &buffer);
-    const stdout = &stdout_file_writer.interface;
-
-    try stdout.writeAll("{\"project\":");
-    try std.json.Stringify.value(project_root, .{}, stdout);
-    try stdout.writeAll(",\"tasks\":[");
-    for (tasks, 0..) |item, index| {
-        if (index > 0) try stdout.writeByte(',');
-        try stdout.writeAll("{\"id\":");
-        try std.json.Stringify.value(item.id, .{}, stdout);
-        try stdout.writeAll(",\"label\":");
-        try std.json.Stringify.value(item.label, .{}, stdout);
-        try stdout.writeAll(",\"source\":");
-        try std.json.Stringify.value(item.source.label(), .{}, stdout);
-        try stdout.writeAll(",\"cwd\":");
-        try std.json.Stringify.value(item.cwd, .{}, stdout);
-        try stdout.writeAll(",\"description\":");
-        try std.json.Stringify.value(item.description, .{}, stdout);
-        try stdout.writeAll(",\"group\":");
-        try std.json.Stringify.value(item.group, .{}, stdout);
-        try stdout.print(",\"default\":{},\"watch\":{},\"inherit_env\":{}", .{
-            item.default_task,
-            item.watch,
-            item.inherit_env,
-        });
-        if (item.timeout_ms) |timeout_ms| {
-            try stdout.print(",\"timeout_ms\":{d}", .{timeout_ms});
-        } else {
-            try stdout.writeAll(",\"timeout_ms\":null");
+        for (old_env) |entry| {
+            merged[index] = .{
+                .key = try allocator.dupe(u8, entry.key),
+                .value = try allocator.dupe(u8, entry.value),
+            };
+            index += 1;
         }
-        if (item.max_output_bytes) |limit| {
-            try stdout.print(",\"max_output_bytes\":{d}", .{limit});
-        } else {
-            try stdout.writeAll(",\"max_output_bytes\":null");
+        for (overrides) |override| {
+            const equals = std.mem.indexOfScalar(u8, override, '=') orelse unreachable;
+            merged[index] = .{
+                .key = try allocator.dupe(u8, override[0..equals]),
+                .value = try allocator.dupe(u8, override[equals + 1 ..]),
+            };
+            index += 1;
         }
-        try stdout.writeAll(",\"argv\":[");
-        for (item.argv, 0..) |arg, arg_index| {
-            if (arg_index > 0) try stdout.writeByte(',');
-            try std.json.Stringify.value(arg, .{}, stdout);
+
+        for (old_env) |entry| {
+            allocator.free(entry.key);
+            allocator.free(entry.value);
         }
-        try stdout.writeAll("]}");
+        allocator.free(old_env);
+        item.env = merged;
     }
-    try stdout.writeAll("]}\n");
-    try stdout.flush();
-}
-
-fn printHistory(io: std.Io, project_root: []const u8, entries: []const dockpit.history.Entry) !void {
-    var buffer: [4096]u8 = undefined;
-    var stdout_file_writer: Io.File.Writer = .init(.stdout(), io, &buffer);
-    const stdout = &stdout_file_writer.interface;
-
-    try stdout.print("project: {s}\n", .{project_root});
-    try stdout.writeAll("timestamp_ms       task               status   elapsed_ms\n");
-    try stdout.writeAll("-----------------  -----------------  -------  ----------\n");
-    for (entries) |entry| {
-        try stdout.print("{d:<17}  {s:<17}  {s:<7}  {d}\n", .{
-            entry.timestamp_ms,
-            entry.task_id,
-            entry.status().label(),
-            entry.elapsed_ms,
-        });
-    }
-    if (entries.len == 0) {
-        try stdout.writeAll("(no history)\n");
-    }
-    try stdout.flush();
-}
-
-fn printHistoryJson(io: std.Io, project_root: []const u8, entries: []const dockpit.history.Entry) !void {
-    var buffer: [4096]u8 = undefined;
-    var stdout_file_writer: Io.File.Writer = .init(.stdout(), io, &buffer);
-    const stdout = &stdout_file_writer.interface;
-
-    try stdout.writeAll("{\"project\":");
-    try std.json.Stringify.value(project_root, .{}, stdout);
-    try stdout.writeAll(",\"history\":[");
-    for (entries, 0..) |entry, index| {
-        if (index > 0) try stdout.writeByte(',');
-        try stdout.print("{{\"timestamp_ms\":{d},\"task_id\":", .{entry.timestamp_ms});
-        try std.json.Stringify.value(entry.task_id, .{}, stdout);
-        try stdout.writeAll(",\"status\":");
-        try std.json.Stringify.value(entry.status().label(), .{}, stdout);
-        if (entry.exit_code) |code| {
-            try stdout.print(",\"exit_code\":{d}", .{code});
-        } else {
-            try stdout.writeAll(",\"exit_code\":null");
-        }
-        try stdout.print(",\"elapsed_ms\":{d}}}", .{entry.elapsed_ms});
-    }
-    try stdout.writeAll("]}\n");
-    try stdout.flush();
-}
-
-fn printLine(io: std.Io, line: []const u8) !void {
-    var buffer: [256]u8 = undefined;
-    var stdout_file_writer: Io.File.Writer = .init(.stdout(), io, &buffer);
-    const stdout = &stdout_file_writer.interface;
-    try stdout.print("{s}\n", .{line});
-    try stdout.flush();
 }
 
 fn findTask(tasks: []const dockpit.task.TaskSpec, task_id: []const u8) ?dockpit.task.TaskSpec {
@@ -272,47 +154,4 @@ fn findTask(tasks: []const dockpit.task.TaskSpec, task_id: []const u8) ?dockpit.
     }
 
     return null;
-}
-
-fn printRunResult(io: std.Io, item: dockpit.task.TaskSpec, result: dockpit.runner.RunResult) !void {
-    var buffer: [4096]u8 = undefined;
-    var stdout_file_writer: Io.File.Writer = .init(.stdout(), io, &buffer);
-    const stdout = &stdout_file_writer.interface;
-
-    try stdout.writeByte('$');
-    for (item.argv) |arg| {
-        try stdout.writeByte(' ');
-        try stdout.writeAll(arg);
-    }
-    try stdout.writeByte('\n');
-
-    try stdout.writeAll(result.stdout);
-    try stdout.writeAll(result.stderr);
-
-    switch (result.term) {
-        .exited => |code| try stdout.print("\nexit {d} ({d} ms)\n", .{ code, result.elapsed_ms }),
-        .signal => |signal| try stdout.print("\nsignal {d} ({d} ms)\n", .{ @intFromEnum(signal), result.elapsed_ms }),
-        .stopped => |signal| try stdout.print("\nstopped {d} ({d} ms)\n", .{ @intFromEnum(signal), result.elapsed_ms }),
-        .unknown => |code| try stdout.print("\nunknown {d} ({d} ms)\n", .{ code, result.elapsed_ms }),
-    }
-
-    try stdout.flush();
-}
-
-fn printFailures(io: std.Io, allocator: std.mem.Allocator, result: dockpit.runner.RunResult) !void {
-    const code = result.exitCode() orelse 1;
-    if (code == 0) return;
-
-    const failures = try dockpit.failures.parse(allocator, result.stdout, result.stderr, 12);
-    if (failures.len == 0) return;
-
-    var buffer: [4096]u8 = undefined;
-    var stdout_file_writer: Io.File.Writer = .init(.stdout(), io, &buffer);
-    const stdout = &stdout_file_writer.interface;
-
-    try stdout.writeAll("\nfailures:\n");
-    for (failures) |failure| {
-        try stdout.print("- [{s}] {s}\n", .{ failure.kind.label(), failure.message });
-    }
-    try stdout.flush();
 }

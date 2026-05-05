@@ -39,6 +39,7 @@ Run a task without starting the TUI:
 
 ```sh
 zig build run -- --run zig-build
+zig build run -- --run npm-test --env NODE_ENV=test
 ```
 
 Print or clear recent run history:
@@ -91,6 +92,14 @@ Create `.dockpit.json` in the project root:
 ```json
 {
   "theme": "high-contrast",
+  "version": 3,
+  "default_task": "dev",
+  "default_group": "project",
+  "runner": {
+    "inherit_env": true,
+    "timeout_ms": 120000,
+    "max_output_bytes": 16777216
+  },
   "watch": {
     "debounce_ms": 1000,
     "ignore": ["dist", "tmp"]
@@ -107,8 +116,9 @@ Create `.dockpit.json` in the project root:
       "cwd": ".",
       "description": "Start the development server",
       "group": "serve",
-      "default": true,
       "watch": false,
+      "timeout_ms": 60000,
+      "max_output_bytes": 8388608,
       "env": {
         "NODE_ENV": "development"
       }
@@ -122,9 +132,9 @@ Create `.dockpit.json` in the project root:
 }
 ```
 
-`cmd` must be a non-empty argv array. `dockpit` does not run user-configured commands through a shell. Task metadata fields are optional: `description`, `group`, `default`, and `watch`.
+`cmd` must be a non-empty argv array. `dockpit` does not run user-configured commands through a shell. Task metadata fields are optional: `description`, `group`, `default`, `watch`, `inherit_env`, `timeout_ms`, and `max_output_bytes`.
 
-Configured task ids must be unique, only one task can set `default: true`, and keybindings cannot collide. Supported themes are `default`, `dark`, `light`, and `high-contrast`. Keybinding names include `run`, `rerun`, `cancel`, `clear`, `git`, `changes`, `worktrees`, `details`, `jobs`, `history`, `watch`, `search`, `palette`, `focus`, `help`, and `quit`.
+Config `version` may be omitted for older files; supported explicit versions are `1`, `2`, and `3`. `runner` provides defaults for all configured tasks, and task-level values override those defaults. Configured task ids must be unique, only one task can set `default: true`, and a root `default_task` must point to an existing task. Keybindings cannot collide. Supported themes are `default`, `dark`, `light`, and `high-contrast`. Keybinding names include `run`, `rerun`, `cancel`, `clear`, `git`, `changes`, `worktrees`, `details`, `jobs`, `history`, `watch`, `search`, `palette`, `focus`, `help`, and `quit`.
 
 ## Auto Detection
 
@@ -137,7 +147,7 @@ Configured task ids must be unique, only one task can set `default: true`, and k
 | `Makefile` / `makefile` | `.PHONY` targets or simple targets |
 | `justfile` / `Justfile` | simple recipes without arguments |
 | `package.json` | package scripts via `npm`, `pnpm`, `yarn`, or `bun`, inferred from `packageManager` or lockfiles |
-| npm/pnpm/yarn workspaces | workspace package scripts with each package directory as `cwd` |
+| npm/pnpm/yarn workspaces | workspace package scripts with each package directory as `cwd`, including `pnpm-workspace.yaml` patterns |
 | `deno.json` / `deno.jsonc` | `deno task <name>` |
 | `Cargo.toml` | `cargo build`, `cargo test`, `cargo run` |
 | `go.mod` | `go test ./...`, `go build ./...`, `go run .` |
@@ -153,10 +163,12 @@ Configured task ids must be unique, only one task can set `default: true`, and k
 - Multiple tasks can run concurrently in background threads.
 - TUI task output streams while tasks are running.
 - `x` requests cancellation and terminates the child process for running background tasks.
-- The Git changes view supports `Space` to stage or unstage the selected file and `Enter` to append a diff to output, including untracked files.
+- The Git changes view supports `Space` to stage or unstage the selected file, `Enter` to append a diff to output, and `D` twice to discard the selected change. Untracked file deletion is also confirmation-backed.
+- The history view supports `a`/`s`/`e`/`S` filters for all/success/failed/signal entries, `i` for details, and `C` twice to clear stored history.
 - File watching uses a portable polling snapshot, honors each task's `watch` flag, and ignores generated directories such as `.git`, `.zig-cache`, `zig-out`, `node_modules`, `target`, and `.dockpit`.
 - Per-project run history is stored in `.dockpit/history.log`.
 - Interactive commands should be exposed as non-interactive tasks; dockpit does not allocate a PTY.
+- Release builds are produced by the tag-triggered GitHub Actions release workflow for Linux and macOS, with SHA-256 checksum files attached.
 
 ## Development
 

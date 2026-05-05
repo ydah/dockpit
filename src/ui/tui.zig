@@ -1651,10 +1651,11 @@ fn onStreamOutput(context: *anyopaque, kind: runner.StreamKind, bytes: []const u
 }
 
 fn formatTaskLine(allocator: std.mem.Allocator, item: task.TaskSpec, status: TaskStatus) ![]const u8 {
+    const group = if (item.group.len > 0) item.group else item.source.label();
     return std.fmt.allocPrint(
         allocator,
-        "{s:<22} {s:<7} {s}",
-        .{ item.label, item.source.label(), taskStatusLabel(allocator, status) catch "" },
+        "{s:<22} {s:<10} {s:<7} {s}",
+        .{ item.label, group, item.source.label(), taskStatusLabel(allocator, status) catch "" },
     );
 }
 

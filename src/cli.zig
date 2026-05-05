@@ -13,6 +13,8 @@ pub const HistoryStatus = enum {
     signal,
 };
 
+const max_env_overrides = 32;
+
 pub const Options = struct {
     project_dir: ?[]const u8 = null,
     config_path: []const u8 = ".dockpit.json",
@@ -26,8 +28,14 @@ pub const Options = struct {
     history_limit: usize = 20,
     no_git: bool = false,
     strict_config: bool = false,
+    env_overrides: [max_env_overrides][]const u8 = undefined,
+    env_override_count: usize = 0,
     help: bool = false,
     version: bool = false,
+
+    pub fn envOverrides(options: *const Options) []const []const u8 {
+        return options.env_overrides[0..options.env_override_count];
+    }
 };
 
 pub fn parse(args: []const []const u8) CliError!Options {
@@ -65,6 +73,13 @@ pub fn parse(args: []const []const u8) CliError!Options {
             i += 1;
             if (i >= args.len) return error.MissingValue;
             options.run_task_id = args[i];
+        } else if (std.mem.eql(u8, arg, "--env")) {
+            i += 1;
+            if (i >= args.len) return error.MissingValue;
+            if (!validEnvOverride(args[i])) return error.InvalidValue;
+            if (options.env_override_count == max_env_overrides) return error.InvalidValue;
+            options.env_overrides[options.env_override_count] = args[i];
+            options.env_override_count += 1;
         } else if (std.mem.eql(u8, arg, "--history-task")) {
             i += 1;
             if (i >= args.len) return error.MissingValue;
@@ -83,6 +98,11 @@ pub fn parse(args: []const []const u8) CliError!Options {
     }
 
     return options;
+}
+
+fn validEnvOverride(value: []const u8) bool {
+    const equals = std.mem.indexOfScalar(u8, value, '=') orelse return false;
+    return equals > 0;
 }
 
 fn parseHistoryStatus(value: []const u8) ?HistoryStatus {
@@ -106,6 +126,7 @@ test "parse default options" {
     try std.testing.expectEqual(@as(usize, 20), options.history_limit);
     try std.testing.expect(!options.no_git);
     try std.testing.expect(!options.strict_config);
+    try std.testing.expectEqual(@as(usize, 0), options.envOverrides().len);
 }
 
 test "parse supported flags and values" {
@@ -119,6 +140,10 @@ test "parse supported flags and values" {
         "--json",
         "--run",
         "zig-build",
+        "--env",
+        "NODE_ENV=test",
+        "--env",
+        "RUST_LOG=debug",
         "--history",
         "--history-task",
         "zig-test",
@@ -137,6 +162,9 @@ test "parse supported flags and values" {
     try std.testing.expect(options.print_tasks);
     try std.testing.expect(options.json);
     try std.testing.expectEqualStrings("zig-build", options.run_task_id.?);
+    try std.testing.expectEqual(@as(usize, 2), options.envOverrides().len);
+    try std.testing.expectEqualStrings("NODE_ENV=test", options.envOverrides()[0]);
+    try std.testing.expectEqualStrings("RUST_LOG=debug", options.envOverrides()[1]);
     try std.testing.expect(options.history);
     try std.testing.expectEqualStrings("zig-test", options.history_task_id.?);
     try std.testing.expectEqual(HistoryStatus.failed, options.history_status);
@@ -168,6 +196,12 @@ test "parse rejects missing value" {
 
 test "parse rejects invalid history status" {
     const args = [_][]const u8{ "dockpit", "--history-status", "wat" };
+
+    try std.testing.expectError(error.InvalidValue, parse(&args));
+}
+
+test "parse rejects invalid env override" {
+    const args = [_][]const u8{ "dockpit", "--env", "NOVALUE" };
 
     try std.testing.expectError(error.InvalidValue, parse(&args));
 }
