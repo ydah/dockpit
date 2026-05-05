@@ -2,7 +2,7 @@ const std = @import("std");
 
 const task = @import("task.zig");
 
-const max_output_bytes = 1024 * 1024 * 16;
+const default_max_output_bytes = 1024 * 1024 * 16;
 
 pub const RunnerError = error{
     InvalidTask,
@@ -14,6 +14,11 @@ pub const StreamKind = enum {
 };
 
 pub const StreamCallback = *const fn (context: *anyopaque, kind: StreamKind, bytes: []const u8) anyerror!void;
+
+pub const RunOptions = struct {
+    timeout_ms: ?u64 = null,
+    max_output_bytes: usize = default_max_output_bytes,
+};
 
 pub const RunResult = struct {
     stdout: []u8,
@@ -40,39 +45,61 @@ pub fn runTask(
     item: task.TaskSpec,
     base_env: ?*const std.process.Environ.Map,
 ) !RunResult {
-    if (item.argv.len == 0) return error.InvalidTask;
+    const Context = struct {
+        fn onOutput(_: *anyopaque, _: StreamKind, _: []const u8) !void {}
+    };
 
-    var env_map: std.process.Environ.Map = undefined;
-    var env_ptr: ?*const std.process.Environ.Map = null;
-    var has_env_map = false;
-    defer if (has_env_map) env_map.deinit();
+    var cancel_requested = std.atomic.Value(bool).init(false);
+    var context = Context{};
+    return runTaskStreaming(
+        allocator,
+        io,
+        item,
+        base_env,
+        &cancel_requested,
+        &context,
+        Context.onOutput,
+    );
+}
 
-    if (item.env.len > 0) {
-        env_map = if (base_env) |env| try env.clone(allocator) else std.process.Environ.Map.init(allocator);
-        has_env_map = true;
-        for (item.env) |entry| {
-            try env_map.put(entry.key, entry.value);
+const EnvState = struct {
+    map: std.process.Environ.Map = undefined,
+    active: bool = false,
+    base_ptr: ?*const std.process.Environ.Map = null,
+
+    fn init(
+        allocator: std.mem.Allocator,
+        item: task.TaskSpec,
+        base_env: ?*const std.process.Environ.Map,
+    ) !EnvState {
+        var state = EnvState{};
+
+        if (item.inherit_env and item.env.len == 0) {
+            state.base_ptr = base_env;
+            return state;
         }
-        env_ptr = &env_map;
+
+        state.map = if (item.inherit_env)
+            if (base_env) |env| try env.clone(allocator) else std.process.Environ.Map.init(allocator)
+        else
+            std.process.Environ.Map.init(allocator);
+        state.active = true;
+
+        for (item.env) |entry| {
+            try state.map.put(entry.key, entry.value);
+        }
+        return state;
     }
 
-    const start = std.Io.Clock.awake.now(io);
-    const result = try std.process.run(allocator, io, .{
-        .argv = item.argv,
-        .cwd = .{ .path = item.cwd },
-        .environ_map = env_ptr,
-        .stdout_limit = .limited(max_output_bytes),
-        .stderr_limit = .limited(max_output_bytes),
-    });
-    const elapsed = start.durationTo(std.Io.Clock.awake.now(io)).toMilliseconds();
+    fn ptr(state: *const EnvState) ?*const std.process.Environ.Map {
+        if (state.active) return &state.map;
+        return state.base_ptr;
+    }
 
-    return .{
-        .stdout = result.stdout,
-        .stderr = result.stderr,
-        .term = result.term,
-        .elapsed_ms = @intCast(@max(0, elapsed)),
-    };
-}
+    fn deinit(state: *EnvState) void {
+        if (state.active) state.map.deinit();
+    }
+};
 
 pub fn runTaskStreaming(
     allocator: std.mem.Allocator,
@@ -85,25 +112,15 @@ pub fn runTaskStreaming(
 ) !RunResult {
     if (item.argv.len == 0) return error.InvalidTask;
 
-    var env_map: std.process.Environ.Map = undefined;
-    var env_ptr: ?*const std.process.Environ.Map = null;
-    var has_env_map = false;
-    defer if (has_env_map) env_map.deinit();
-
-    if (item.env.len > 0) {
-        env_map = if (base_env) |env| try env.clone(allocator) else std.process.Environ.Map.init(allocator);
-        has_env_map = true;
-        for (item.env) |entry| {
-            try env_map.put(entry.key, entry.value);
-        }
-        env_ptr = &env_map;
-    }
+    var env_state = try EnvState.init(allocator, item, base_env);
+    defer env_state.deinit();
+    const options = runOptions(item);
 
     const start = std.Io.Clock.awake.now(io);
     var child = try std.process.spawn(io, .{
         .argv = item.argv,
         .cwd = .{ .path = item.cwd },
-        .environ_map = env_ptr,
+        .environ_map = env_state.ptr(),
         .stdin = .ignore,
         .stdout = .pipe,
         .stderr = .pipe,
@@ -123,7 +140,7 @@ pub fn runTaskStreaming(
     var stderr: std.ArrayList(u8) = .empty;
     errdefer stderr.deinit(allocator);
 
-    var killed = false;
+    var forced_term: ?std.process.Child.Term = null;
     const poll_timeout: std.Io.Timeout = .{
         .duration = .{
             .raw = .fromMilliseconds(50),
@@ -134,7 +151,12 @@ pub fn runTaskStreaming(
     while (true) {
         if (cancel_requested.load(.acquire)) {
             child.kill(io);
-            killed = true;
+            forced_term = .{ .unknown = 130 };
+            break;
+        }
+        if (timedOut(io, start, options.timeout_ms)) {
+            child.kill(io);
+            forced_term = .{ .unknown = 124 };
             break;
         }
 
@@ -146,17 +168,15 @@ pub fn runTaskStreaming(
 
         try drainBuffered(allocator, stdout_reader, &stdout, .stdout, context, callback);
         try drainBuffered(allocator, stderr_reader, &stderr, .stderr, context, callback);
-        if (stdout.items.len > max_output_bytes or stderr.items.len > max_output_bytes) return error.StreamTooLong;
+        if (stdout.items.len > options.max_output_bytes or stderr.items.len > options.max_output_bytes) return error.StreamTooLong;
     }
 
     try drainBuffered(allocator, stdout_reader, &stdout, .stdout, context, callback);
     try drainBuffered(allocator, stderr_reader, &stderr, .stderr, context, callback);
-    if (!killed) try multi_reader.checkAnyError();
+    if (stdout.items.len > options.max_output_bytes or stderr.items.len > options.max_output_bytes) return error.StreamTooLong;
+    if (forced_term == null) try multi_reader.checkAnyError();
 
-    const term: std.process.Child.Term = if (killed)
-        .{ .unknown = 130 }
-    else
-        try child.wait(io);
+    const term: std.process.Child.Term = forced_term orelse try child.wait(io);
     const elapsed = start.durationTo(std.Io.Clock.awake.now(io)).toMilliseconds();
 
     const stdout_owned = try stdout.toOwnedSlice(allocator);
@@ -169,6 +189,19 @@ pub fn runTaskStreaming(
         .term = term,
         .elapsed_ms = @intCast(@max(0, elapsed)),
     };
+}
+
+fn runOptions(item: task.TaskSpec) RunOptions {
+    return .{
+        .timeout_ms = item.timeout_ms,
+        .max_output_bytes = item.max_output_bytes orelse default_max_output_bytes,
+    };
+}
+
+fn timedOut(io: std.Io, start: std.Io.Timestamp, timeout_ms: ?u64) bool {
+    const timeout = timeout_ms orelse return false;
+    const elapsed = start.durationTo(std.Io.Clock.awake.now(io)).toMilliseconds();
+    return @as(u64, @intCast(@max(0, elapsed))) >= timeout;
 }
 
 fn drainBuffered(
@@ -206,6 +239,76 @@ test "run task captures stdout" {
     try std.testing.expectEqual(@as(?u8, 0), result.exitCode());
     try std.testing.expectEqualStrings("hello\n", result.stdout);
     try std.testing.expectEqualStrings("", result.stderr);
+}
+
+test "run task enforces max output bytes" {
+    const cwd = try std.Io.Dir.cwd().realPathFileAlloc(std.testing.io, ".", std.testing.allocator);
+    defer std.testing.allocator.free(cwd);
+
+    const item = task.TaskSpec{
+        .id = "echo",
+        .label = "echo",
+        .argv = &.{ "/bin/echo", "hello" },
+        .cwd = cwd,
+        .source = .config,
+        .max_output_bytes = 1,
+    };
+
+    try std.testing.expectError(
+        error.StreamTooLong,
+        runTask(std.testing.allocator, std.testing.io, item, null),
+    );
+}
+
+test "run task honors timeout" {
+    const cwd = try std.Io.Dir.cwd().realPathFileAlloc(std.testing.io, ".", std.testing.allocator);
+    defer std.testing.allocator.free(cwd);
+
+    const item = task.TaskSpec{
+        .id = "sleep",
+        .label = "sleep",
+        .argv = &.{ "/bin/sleep", "5" },
+        .cwd = cwd,
+        .source = .config,
+        .timeout_ms = 50,
+    };
+
+    const result = try runTask(std.testing.allocator, std.testing.io, item, null);
+    defer result.deinit(std.testing.allocator);
+
+    try std.testing.expectEqual(std.process.Child.Term{ .unknown = 124 }, result.term);
+}
+
+test "run task can disable inherited environment" {
+    var env_map = std.process.Environ.Map.init(std.testing.allocator);
+    defer env_map.deinit();
+    try env_map.put("DOCKPIT_TEST_ENV", "visible");
+
+    const cwd = try std.Io.Dir.cwd().realPathFileAlloc(std.testing.io, ".", std.testing.allocator);
+    defer std.testing.allocator.free(cwd);
+
+    const inherited = task.TaskSpec{
+        .id = "env",
+        .label = "env",
+        .argv = &.{"/usr/bin/env"},
+        .cwd = cwd,
+        .source = .config,
+    };
+    const inherited_result = try runTask(std.testing.allocator, std.testing.io, inherited, &env_map);
+    defer inherited_result.deinit(std.testing.allocator);
+    try std.testing.expect(std.mem.indexOf(u8, inherited_result.stdout, "DOCKPIT_TEST_ENV=visible") != null);
+
+    const isolated = task.TaskSpec{
+        .id = "env",
+        .label = "env",
+        .argv = &.{"/usr/bin/env"},
+        .cwd = cwd,
+        .source = .config,
+        .inherit_env = false,
+    };
+    const isolated_result = try runTask(std.testing.allocator, std.testing.io, isolated, &env_map);
+    defer isolated_result.deinit(std.testing.allocator);
+    try std.testing.expect(std.mem.indexOf(u8, isolated_result.stdout, "DOCKPIT_TEST_ENV=visible") == null);
 }
 
 test "streaming task emits output chunks" {

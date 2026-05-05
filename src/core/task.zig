@@ -58,6 +58,9 @@ pub const TaskSpec = struct {
     group: []const u8 = "",
     default_task: bool = false,
     watch: bool = true,
+    inherit_env: bool = true,
+    timeout_ms: ?u64 = null,
+    max_output_bytes: ?usize = null,
 
     pub fn commandEquals(a: TaskSpec, b: TaskSpec) bool {
         if (!std.mem.eql(u8, a.cwd, b.cwd)) return false;

@@ -1027,6 +1027,15 @@ const RootWidget = struct {
         defer self.allocator.free(command);
         try self.pushDetailLine("command", command);
         try self.pushDetailLine("watch", if (item.watch) "on" else "off");
+        try self.pushDetailLine("inherit env", if (item.inherit_env) "on" else "off");
+        if (item.timeout_ms) |timeout_ms| {
+            var timeout_buffer: [32]u8 = undefined;
+            try self.pushDetailLine("timeout ms", try std.fmt.bufPrint(&timeout_buffer, "{d}", .{timeout_ms}));
+        }
+        if (item.max_output_bytes) |limit| {
+            var limit_buffer: [32]u8 = undefined;
+            try self.pushDetailLine("max output bytes", try std.fmt.bufPrint(&limit_buffer, "{d}", .{limit}));
+        }
         self.state.focused_pane = .output;
         self.state.dispatch(.{ .set_status = "task details" });
     }

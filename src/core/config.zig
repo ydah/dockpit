@@ -8,6 +8,8 @@ pub const ConfigError = error{
     EmptyCommandArg,
     DuplicateTaskId,
     DuplicateDefaultTask,
+    UnsupportedConfigVersion,
+    UnknownDefaultTask,
     InvalidCwd,
     DuplicateKeyBinding,
 };
@@ -58,6 +60,18 @@ pub const WatchSettings = struct {
     ignore: []const []const u8 = &.{},
 };
 
+pub const RunnerSettings = struct {
+    inherit_env: bool = true,
+    timeout_ms: ?u64 = null,
+    max_output_bytes: ?usize = null,
+};
+
+const TaskDefaults = struct {
+    runner: RunnerSettings = .{},
+    default_task_id: ?[]const u8 = null,
+    default_group: ?[]const u8 = null,
+};
+
 pub fn loadSettings(
     allocator: std.mem.Allocator,
     io: std.Io,
@@ -78,6 +92,7 @@ pub fn loadSettings(
 
     const root = parsed.value;
     if (root != .object) return error.InvalidConfig;
+    try validateConfigVersion(root.object.get("version"));
 
     var settings = Settings{};
     if (root.object.get("theme")) |theme_value| {
@@ -113,6 +128,13 @@ pub fn loadConfigTasks(
 
     const root = parsed.value;
     if (root != .object) return error.InvalidConfig;
+    try validateConfigVersion(root.object.get("version"));
+
+    const defaults = TaskDefaults{
+        .runner = if (root.object.get("runner")) |runner_value| try parseRunnerSettings(runner_value) else .{},
+        .default_task_id = if (root.object.get("default_task")) |default_value| try requiredString(default_value) else null,
+        .default_group = if (root.object.get("default_group")) |group_value| try requiredString(group_value) else null,
+    };
 
     const tasks_value = root.object.get("tasks") orelse return try allocator.alloc(task.TaskSpec, 0);
     if (tasks_value != .array) return error.InvalidConfig;
@@ -125,7 +147,7 @@ pub fn loadConfigTasks(
     var has_default = false;
 
     for (tasks_value.array.items) |task_value| {
-        const item = try parseTask(allocator, io, project_root, task_value);
+        const item = try parseTask(allocator, io, project_root, task_value, defaults);
         validateTask(tasks.items, item, &has_default) catch |err| {
             item.deinit(allocator);
             return err;
@@ -135,8 +157,19 @@ pub fn loadConfigTasks(
             return err;
         };
     }
+    if (defaults.default_task_id != null and !has_default) return error.UnknownDefaultTask;
 
     return tasks.toOwnedSlice(allocator);
+}
+
+fn validateConfigVersion(value: ?std.json.Value) !void {
+    const actual = value orelse return;
+    const version = switch (actual) {
+        .integer => |integer| integer,
+        .string => |string| std.fmt.parseInt(i64, string, 10) catch return error.InvalidConfig,
+        else => return error.InvalidConfig,
+    };
+    if (version < 1 or version > 3) return error.UnsupportedConfigVersion;
 }
 
 fn parseTheme(value: std.json.Value) !Theme {
@@ -181,7 +214,29 @@ fn parseWatchSettings(allocator: std.mem.Allocator, value: std.json.Value) !Watc
     return settings;
 }
 
-fn parseTask(allocator: std.mem.Allocator, io: std.Io, project_root: []const u8, value: std.json.Value) !task.TaskSpec {
+fn parseRunnerSettings(value: std.json.Value) !RunnerSettings {
+    if (value != .object) return error.InvalidConfig;
+
+    var settings = RunnerSettings{};
+    if (value.object.get("inherit_env")) |inherit_value| {
+        settings.inherit_env = try optionalBool(inherit_value);
+    }
+    if (value.object.get("timeout_ms")) |timeout_value| {
+        settings.timeout_ms = try positiveInteger(timeout_value);
+    }
+    if (value.object.get("max_output_bytes")) |limit_value| {
+        settings.max_output_bytes = try positiveIntegerAsUsize(limit_value);
+    }
+    return settings;
+}
+
+fn parseTask(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    project_root: []const u8,
+    value: std.json.Value,
+    defaults: TaskDefaults,
+) !task.TaskSpec {
     if (value != .object) return error.InvalidConfig;
 
     const id = try requiredString(value.object.get("id"));
@@ -225,11 +280,15 @@ fn parseTask(allocator: std.mem.Allocator, io: std.Io, project_root: []const u8,
 
     const group = if (value.object.get("group")) |group_value|
         try allocator.dupe(u8, try requiredString(group_value))
+    else if (defaults.default_group) |group_value|
+        try allocator.dupe(u8, group_value)
     else
         try allocator.dupe(u8, "");
 
     const default_task = if (value.object.get("default")) |default_value|
         try optionalBool(default_value)
+    else if (defaults.default_task_id) |default_task_id|
+        std.mem.eql(u8, id, default_task_id)
     else
         false;
 
@@ -237,6 +296,21 @@ fn parseTask(allocator: std.mem.Allocator, io: std.Io, project_root: []const u8,
         try optionalBool(watch_value)
     else
         true;
+
+    const inherit_env = if (value.object.get("inherit_env")) |inherit_value|
+        try optionalBool(inherit_value)
+    else
+        defaults.runner.inherit_env;
+
+    const timeout_ms = if (value.object.get("timeout_ms")) |timeout_value|
+        try positiveInteger(timeout_value)
+    else
+        defaults.runner.timeout_ms;
+
+    const max_output_bytes = if (value.object.get("max_output_bytes")) |limit_value|
+        try positiveIntegerAsUsize(limit_value)
+    else
+        defaults.runner.max_output_bytes;
 
     return .{
         .id = try allocator.dupe(u8, id),
@@ -249,6 +323,9 @@ fn parseTask(allocator: std.mem.Allocator, io: std.Io, project_root: []const u8,
         .group = group,
         .default_task = default_task,
         .watch = watch,
+        .inherit_env = inherit_env,
+        .timeout_ms = timeout_ms,
+        .max_output_bytes = max_output_bytes,
     };
 }
 
@@ -315,6 +392,12 @@ fn positiveInteger(value: std.json.Value) !u64 {
     return @intCast(value.integer);
 }
 
+fn positiveIntegerAsUsize(value: std.json.Value) !usize {
+    const integer = try positiveInteger(value);
+    if (integer > std.math.maxInt(usize)) return error.InvalidConfig;
+    return @intCast(integer);
+}
+
 fn resolveConfigPath(allocator: std.mem.Allocator, project_root: []const u8, config_path: []const u8) ![]u8 {
     if (std.fs.path.isAbsolute(config_path)) return allocator.dupe(u8, config_path);
     return std.fs.path.join(allocator, &.{ project_root, config_path });
@@ -351,6 +434,13 @@ test "load config tasks from dockpit json" {
     try std.testing.expectEqualStrings("serve", tasks[0].group);
     try std.testing.expect(tasks[0].default_task);
     try std.testing.expect(!tasks[0].watch);
+    try std.testing.expect(tasks[0].inherit_env);
+    try std.testing.expectEqual(@as(?u64, 1000), tasks[0].timeout_ms);
+    try std.testing.expectEqual(@as(?usize, 8192), tasks[0].max_output_bytes);
+    try std.testing.expectEqualStrings("project", tasks[1].group);
+    try std.testing.expect(!tasks[1].inherit_env);
+    try std.testing.expectEqual(@as(?u64, 5000), tasks[1].timeout_ms);
+    try std.testing.expectEqual(@as(?usize, 4096), tasks[1].max_output_bytes);
 }
 
 test "load settings from dockpit json" {
@@ -453,6 +543,40 @@ test "duplicate default tasks return an error" {
     try std.testing.expectError(
         error.DuplicateDefaultTask,
         loadConfigTasks(allocator, std.testing.io, root, "duplicate_default.json"),
+    );
+}
+
+test "unsupported config versions return an error" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    const root = try std.Io.Dir.cwd().realPathFileAlloc(
+        std.testing.io,
+        "tests/fixtures/config_project",
+        allocator,
+    );
+
+    try std.testing.expectError(
+        error.UnsupportedConfigVersion,
+        loadConfigTasks(allocator, std.testing.io, root, "unsupported_version.json"),
+    );
+}
+
+test "unknown root default tasks return an error" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    const root = try std.Io.Dir.cwd().realPathFileAlloc(
+        std.testing.io,
+        "tests/fixtures/config_project",
+        allocator,
+    );
+
+    try std.testing.expectError(
+        error.UnknownDefaultTask,
+        loadConfigTasks(allocator, std.testing.io, root, "unknown_default.json"),
     );
 }
 

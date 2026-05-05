@@ -1,12 +1,22 @@
 {
+  "version": 3,
+  "default_task": "dev",
+  "default_group": "project",
+  "runner": {
+    "inherit_env": false,
+    "timeout_ms": 5000,
+    "max_output_bytes": 4096
+  },
   "tasks": [
     {
       "id": "dev",
       "label": "dev server",
       "description": "Start the development server",
       "group": "serve",
-      "default": true,
       "watch": false,
+      "inherit_env": true,
+      "timeout_ms": 1000,
+      "max_output_bytes": 8192,
       "cmd": ["npm", "run", "dev"],
       "cwd": ".",
       "env": {

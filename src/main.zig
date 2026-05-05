@@ -181,6 +181,25 @@ fn printTasksJson(io: std.Io, project_root: []const u8, tasks: []const dockpit.t
         try std.json.Stringify.value(item.source.label(), .{}, stdout);
         try stdout.writeAll(",\"cwd\":");
         try std.json.Stringify.value(item.cwd, .{}, stdout);
+        try stdout.writeAll(",\"description\":");
+        try std.json.Stringify.value(item.description, .{}, stdout);
+        try stdout.writeAll(",\"group\":");
+        try std.json.Stringify.value(item.group, .{}, stdout);
+        try stdout.print(",\"default\":{},\"watch\":{},\"inherit_env\":{}", .{
+            item.default_task,
+            item.watch,
+            item.inherit_env,
+        });
+        if (item.timeout_ms) |timeout_ms| {
+            try stdout.print(",\"timeout_ms\":{d}", .{timeout_ms});
+        } else {
+            try stdout.writeAll(",\"timeout_ms\":null");
+        }
+        if (item.max_output_bytes) |limit| {
+            try stdout.print(",\"max_output_bytes\":{d}", .{limit});
+        } else {
+            try stdout.writeAll(",\"max_output_bytes\":null");
+        }
         try stdout.writeAll(",\"argv\":[");
         for (item.argv, 0..) |arg, arg_index| {
             if (arg_index > 0) try stdout.writeByte(',');

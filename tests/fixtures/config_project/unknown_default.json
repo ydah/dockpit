@@ -1,0 +1,10 @@
+{
+  "version": 3,
+  "default_task": "missing",
+  "tasks": [
+    {
+      "id": "test",
+      "cmd": ["zig", "build", "test"]
+    }
+  ]
+}
