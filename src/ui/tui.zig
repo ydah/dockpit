@@ -67,6 +67,9 @@ const RootWidget = struct {
     selected_job_index: usize = 0,
     selected_history_index: usize = 0,
     selected_change_index: usize = 0,
+    history_filter: history.Status = .all,
+    pending_history_clear: bool = false,
+    pending_discard_path: ?[]const u8 = null,
     palette_index: usize = 0,
     palette_query: std.ArrayList(u8) = .empty,
     watch_enabled: bool = false,
@@ -83,6 +86,7 @@ const RootWidget = struct {
         }
         self.jobs.deinit(self.allocator);
         self.palette_query.deinit(self.allocator);
+        self.freePendingDiscardPath();
         self.changed_files.deinit();
         self.freeHistoryEntries();
         self.allocator.free(self.task_statuses);
@@ -287,20 +291,55 @@ const RootWidget = struct {
         {
             self.state.dispatch(.exit_mode);
             self.state.dispatch(.{ .set_status = "ready" });
+            self.pending_history_clear = false;
             ctx.consumeAndRedraw();
             return true;
         }
         if (key.matches('j', .{}) or key.matches(vaxis.Key.down, .{})) {
+            self.pending_history_clear = false;
             if (self.selected_history_index + 1 < self.history_entries.len) self.selected_history_index += 1;
             ctx.consumeAndRedraw();
             return true;
         }
         if (key.matches('k', .{}) or key.matches(vaxis.Key.up, .{})) {
+            self.pending_history_clear = false;
             if (self.selected_history_index > 0) self.selected_history_index -= 1;
             ctx.consumeAndRedraw();
             return true;
         }
+        if (key.matches('a', .{})) {
+            try self.setHistoryFilter(.all);
+            ctx.consumeAndRedraw();
+            return true;
+        }
+        if (key.matches('s', .{})) {
+            try self.setHistoryFilter(.success);
+            ctx.consumeAndRedraw();
+            return true;
+        }
+        if (key.matches('e', .{})) {
+            try self.setHistoryFilter(.failed);
+            ctx.consumeAndRedraw();
+            return true;
+        }
+        if (key.matches('S', .{})) {
+            try self.setHistoryFilter(.signal);
+            ctx.consumeAndRedraw();
+            return true;
+        }
+        if (key.matches('C', .{})) {
+            try self.clearHistoryWithConfirmation();
+            ctx.consumeAndRedraw();
+            return true;
+        }
+        if (matchesBinding(key, self.settings.keybindings.details)) {
+            try self.showSelectedHistoryDetails();
+            self.pending_history_clear = false;
+            ctx.consumeAndRedraw();
+            return true;
+        }
         if (key.matches(vaxis.Key.enter, .{}) or matchesBinding(key, self.settings.keybindings.rerun)) {
+            self.pending_history_clear = false;
             if (self.selectedHistoryTask()) |item| {
                 try self.startTask(ctx, item);
                 self.state.dispatch(.exit_mode);
@@ -311,6 +350,7 @@ const RootWidget = struct {
             return true;
         }
 
+        self.pending_history_clear = false;
         ctx.consumeAndRedraw();
         return true;
     }
@@ -325,33 +365,46 @@ const RootWidget = struct {
         {
             self.state.dispatch(.exit_mode);
             self.state.dispatch(.{ .set_status = "ready" });
+            self.clearPendingDiscardPath();
             ctx.consumeAndRedraw();
             return true;
         }
         if (key.matches('j', .{}) or key.matches(vaxis.Key.down, .{})) {
+            self.clearPendingDiscardPath();
             if (self.selected_change_index + 1 < self.changed_files.items.len) self.selected_change_index += 1;
             ctx.consumeAndRedraw();
             return true;
         }
         if (key.matches('k', .{}) or key.matches(vaxis.Key.up, .{})) {
+            self.clearPendingDiscardPath();
             if (self.selected_change_index > 0) self.selected_change_index -= 1;
             ctx.consumeAndRedraw();
             return true;
         }
         if (matchesBinding(key, self.settings.keybindings.git)) {
+            self.clearPendingDiscardPath();
             self.refreshGit();
             try self.refreshChanges();
             ctx.consumeAndRedraw();
             return true;
         }
         if (key.matches(' ', .{})) {
+            self.clearPendingDiscardPath();
             self.toggleSelectedChange() catch |err| {
                 self.state.dispatch(.{ .set_status = @errorName(err) });
             };
             ctx.consumeAndRedraw();
             return true;
         }
+        if (key.matches('D', .{})) {
+            self.discardSelectedChangeWithConfirmation() catch |err| {
+                self.state.dispatch(.{ .set_status = @errorName(err) });
+            };
+            ctx.consumeAndRedraw();
+            return true;
+        }
         if (key.matches(vaxis.Key.enter, .{}) or key.matches('d', .{})) {
+            self.clearPendingDiscardPath();
             self.showSelectedDiff() catch |err| {
                 self.state.dispatch(.{ .set_status = @errorName(err) });
             };
@@ -359,6 +412,7 @@ const RootWidget = struct {
             return true;
         }
 
+        self.clearPendingDiscardPath();
         ctx.consumeAndRedraw();
         return true;
     }
@@ -813,9 +867,54 @@ const RootWidget = struct {
 
     fn refreshHistory(self: *RootWidget) !void {
         self.freeHistoryEntries();
-        self.history_entries = try history.loadRecent(self.allocator, self.io, self.state.project_root, 50);
+        self.history_entries = try history.loadRecentFiltered(self.allocator, self.io, self.state.project_root, 50, .{
+            .status = self.history_filter,
+        });
         self.clampSelectedHistory();
         self.applyHistoryToTasks();
+    }
+
+    fn setHistoryFilter(self: *RootWidget, status: history.Status) !void {
+        self.history_filter = status;
+        self.pending_history_clear = false;
+        try self.refreshHistory();
+        self.state.dispatch(.{ .set_status = status.label() });
+    }
+
+    fn clearHistoryWithConfirmation(self: *RootWidget) !void {
+        if (!self.pending_history_clear) {
+            self.pending_history_clear = true;
+            self.state.dispatch(.{ .set_status = "press C again to clear history" });
+            return;
+        }
+
+        self.pending_history_clear = false;
+        try history.clear(self.allocator, self.io, self.state.project_root);
+        try self.refreshHistory();
+        self.state.dispatch(.{ .set_status = "history cleared" });
+    }
+
+    fn showSelectedHistoryDetails(self: *RootWidget) !void {
+        if (self.history_entries.len == 0) {
+            self.state.dispatch(.{ .set_status = "no history" });
+            return;
+        }
+
+        self.clampSelectedHistory();
+        const entry = self.history_entries[self.selected_history_index];
+        try self.state.log.push(.system, "History entry", timestampMs(self.io));
+        try self.pushDetailLine("task", entry.task_id);
+        try self.pushDetailLine("status", entry.status().label());
+        var timestamp_buffer: [32]u8 = undefined;
+        try self.pushDetailLine("timestamp ms", try std.fmt.bufPrint(&timestamp_buffer, "{d}", .{entry.timestamp_ms}));
+        var elapsed_buffer: [32]u8 = undefined;
+        try self.pushDetailLine("elapsed ms", try std.fmt.bufPrint(&elapsed_buffer, "{d}", .{entry.elapsed_ms}));
+        if (entry.exit_code) |code| {
+            var code_buffer: [16]u8 = undefined;
+            try self.pushDetailLine("exit code", try std.fmt.bufPrint(&code_buffer, "{d}", .{code}));
+        }
+        self.state.focused_pane = .output;
+        self.state.dispatch(.{ .set_status = "history details" });
     }
 
     fn freeHistoryEntries(self: *RootWidget) void {
@@ -937,6 +1036,7 @@ const RootWidget = struct {
         self.changed_files.deinit();
         self.changed_files = next;
         self.clampSelectedChange();
+        self.clearPendingDiscardPath();
     }
 
     fn toggleSelectedChange(self: *RootWidget) !void {
@@ -956,6 +1056,33 @@ const RootWidget = struct {
         }
         self.refreshGit();
         try self.refreshChanges();
+    }
+
+    fn discardSelectedChangeWithConfirmation(self: *RootWidget) !void {
+        if (self.changed_files.items.len == 0) {
+            self.clearPendingDiscardPath();
+            self.state.dispatch(.{ .set_status = "no changes" });
+            return;
+        }
+
+        self.clampSelectedChange();
+        const item = self.changed_files.items[self.selected_change_index];
+        if (self.pending_discard_path) |path| {
+            if (std.mem.eql(u8, path, item.path)) {
+                try git.discardChangedFile(self.allocator, self.io, self.state.project_root, item);
+                self.clearPendingDiscardPath();
+                self.refreshGit();
+                try self.refreshChanges();
+                self.state.dispatch(.{ .set_status = "discarded" });
+                return;
+            }
+        }
+
+        self.setPendingDiscardPath(item.path) catch {
+            self.state.dispatch(.{ .set_status = "confirm discard" });
+            return;
+        };
+        self.state.dispatch(.{ .set_status = "press D again to discard" });
     }
 
     fn showSelectedDiff(self: *RootWidget) !void {
@@ -982,6 +1109,22 @@ const RootWidget = struct {
         }
         if (count == 0) try self.state.log.push(.system, "(no diff output)", timestampMs(self.io));
         self.state.dispatch(.{ .set_status = "diff shown" });
+    }
+
+    fn setPendingDiscardPath(self: *RootWidget, path: []const u8) !void {
+        self.freePendingDiscardPath();
+        self.pending_discard_path = try self.allocator.dupe(u8, path);
+    }
+
+    fn clearPendingDiscardPath(self: *RootWidget) void {
+        self.freePendingDiscardPath();
+    }
+
+    fn freePendingDiscardPath(self: *RootWidget) void {
+        if (self.pending_discard_path) |path| {
+            self.allocator.free(path);
+            self.pending_discard_path = null;
+        }
     }
 
     fn showWorktrees(self: *RootWidget) !void {
@@ -1237,7 +1380,7 @@ const RootWidget = struct {
             ":  command palette",
             "J  show running jobs",
             "h  show run history",
-            "f  show Git changes; Space stage/unstage; Enter show diff",
+            "f  show Git changes; Space stage/unstage; Enter show diff; D discard",
             "i  show selected task details",
             "r  rerun last task",
             "x  cancel newest running task",
@@ -1280,7 +1423,9 @@ const RootWidget = struct {
     }
 
     fn drawHistory(self: *RootWidget, surface: vxfw.Surface, rect: layout.Rect) void {
-        widgets.drawBox(surface, rect, "History");
+        const title = std.fmt.allocPrint(self.allocator, "History ({s})", .{self.history_filter.label()}) catch "History";
+        defer if (title.ptr != "History".ptr) self.allocator.free(title);
+        widgets.drawBox(surface, rect, title);
         if (rect.height <= 2 or rect.width <= 4) return;
         if (self.history_entries.len == 0) {
             widgets.writeTextClipped(surface, rect.y + 1, rect.x + 2, "No history yet", rect.width - 4);
@@ -1367,9 +1512,9 @@ const RootWidget = struct {
         else if (self.state.mode == .jobs)
             "jobs: j/k select  x cancel  Esc close"
         else if (self.state.mode == .history)
-            "history: j/k select  Enter rerun  Esc close"
+            "history: a all s ok e failed S signal C clear i details Enter rerun Esc close"
         else if (self.state.mode == .changes)
-            "changes: j/k select  Space stage  Enter diff  g refresh  Esc close"
+            "changes: j/k select  Space stage  Enter diff  D discard  g refresh  Esc close"
         else if (running_count > 0)
             std.fmt.allocPrint(arena, "running: {d}  {s}", .{ running_count, git_line }) catch "running"
         else if (self.watch_enabled)

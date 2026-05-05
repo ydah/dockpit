@@ -147,11 +147,38 @@ pub fn loadChangedFiles(allocator: std.mem.Allocator, io: std.Io, project_root: 
 }
 
 pub fn stagePath(allocator: std.mem.Allocator, io: std.Io, project_root: []const u8, path: []const u8) !void {
+    try validateRelativePath(path);
     try runGitNoOutput(allocator, io, project_root, &.{ "git", "add", "--", path });
 }
 
 pub fn unstagePath(allocator: std.mem.Allocator, io: std.Io, project_root: []const u8, path: []const u8) !void {
+    try validateRelativePath(path);
     try runGitNoOutput(allocator, io, project_root, &.{ "git", "restore", "--staged", "--", path });
+}
+
+pub fn discardChangedFile(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    project_root: []const u8,
+    item: ChangedFile,
+) !void {
+    try validateRelativePath(item.path);
+
+    if (item.state == .untracked) {
+        try deleteWorktreeFile(allocator, io, project_root, item.path);
+        return;
+    }
+
+    if (item.state == .added and item.index_status == 'A') {
+        try runGitNoOutput(allocator, io, project_root, &.{ "git", "restore", "--staged", "--", item.path });
+        deleteWorktreeFile(allocator, io, project_root, item.path) catch |err| switch (err) {
+            error.FileNotFound, error.NotDir => {},
+            else => |e| return e,
+        };
+        return;
+    }
+
+    try runGitNoOutput(allocator, io, project_root, &.{ "git", "restore", "--staged", "--worktree", "--", item.path });
 }
 
 pub fn diffPath(
@@ -161,6 +188,7 @@ pub fn diffPath(
     path: []const u8,
     staged: bool,
 ) ![]u8 {
+    try validateRelativePath(path);
     const staged_argv: []const []const u8 = &.{ "git", "diff", "--cached", "--", path };
     const unstaged_argv: []const []const u8 = &.{ "git", "diff", "--", path };
     const argv = if (staged) staged_argv else unstaged_argv;
@@ -347,6 +375,7 @@ fn untrackedDiff(
     project_root: []const u8,
     path: []const u8,
 ) ![]u8 {
+    try validateRelativePath(path);
     const absolute_path = try std.fs.path.join(allocator, &.{ project_root, path });
     defer allocator.free(absolute_path);
 
@@ -363,6 +392,25 @@ fn untrackedDiff(
         try out.writer.writeByte('\n');
     }
     return out.toOwnedSlice();
+}
+
+fn deleteWorktreeFile(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    project_root: []const u8,
+    path: []const u8,
+) !void {
+    const absolute_path = try std.fs.path.join(allocator, &.{ project_root, path });
+    defer allocator.free(absolute_path);
+    try std.Io.Dir.cwd().deleteFile(io, absolute_path);
+}
+
+fn validateRelativePath(path: []const u8) !void {
+    if (path.len == 0 or std.fs.path.isAbsolute(path)) return error.UnsafePath;
+    var components = std.mem.splitAny(u8, path, "/\\");
+    while (components.next()) |component| {
+        if (std.mem.eql(u8, component, "..")) return error.UnsafePath;
+    }
 }
 
 fn isSuccess(term: std.process.Child.Term) bool {
@@ -460,6 +508,45 @@ test "untracked diff renders file contents" {
     try std.testing.expect(std.mem.indexOf(u8, diff, "+hello") != null);
 }
 
+test "relative path validation rejects unsafe paths" {
+    try validateRelativePath("src/main.zig");
+    try std.testing.expectError(error.UnsafePath, validateRelativePath(""));
+    try std.testing.expectError(error.UnsafePath, validateRelativePath("../secret"));
+    try std.testing.expectError(error.UnsafePath, validateRelativePath("/tmp/secret"));
+}
+
+test "discard changed file restores tracked changes and deletes untracked files" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    const root = try std.fmt.allocPrint(allocator, ".zig-cache/tmp/{s}", .{tmp.sub_path});
+
+    try runGitForTest(allocator, std.testing.io, root, &.{ "git", "init" });
+    try std.Io.Dir.cwd().writeFile(std.testing.io, .{ .sub_path = try std.fmt.allocPrint(allocator, "{s}/tracked.txt", .{root}), .data = "original\n" });
+    try runGitForTest(allocator, std.testing.io, root, &.{ "git", "add", "tracked.txt" });
+    try runGitForTest(allocator, std.testing.io, root, &.{ "git", "-c", "user.name=dockpit", "-c", "user.email=dockpit@example.invalid", "-c", "commit.gpgsign=false", "commit", "-m", "init" });
+
+    try std.Io.Dir.cwd().writeFile(std.testing.io, .{ .sub_path = try std.fmt.allocPrint(allocator, "{s}/tracked.txt", .{root}), .data = "changed\n" });
+    try std.Io.Dir.cwd().writeFile(std.testing.io, .{ .sub_path = try std.fmt.allocPrint(allocator, "{s}/new.txt", .{root}), .data = "new\n" });
+
+    var changes = loadChangedFiles(allocator, std.testing.io, root);
+    defer changes.deinit();
+    try std.testing.expectEqual(@as(usize, 2), changes.items.len);
+    for (changes.items) |item| {
+        try discardChangedFile(allocator, std.testing.io, root, item);
+    }
+
+    const tracked = try std.Io.Dir.cwd().readFileAlloc(std.testing.io, try std.fmt.allocPrint(allocator, "{s}/tracked.txt", .{root}), allocator, .limited(1024));
+    try std.testing.expectEqualStrings("original\n", tracked);
+    try std.testing.expectError(
+        error.FileNotFound,
+        std.Io.Dir.cwd().access(std.testing.io, try std.fmt.allocPrint(allocator, "{s}/new.txt", .{root}), .{}),
+    );
+}
+
 test "parse worktree porcelain output" {
     const items = try parseWorktreePorcelain(std.testing.allocator,
         \\worktree /repo
@@ -481,4 +568,16 @@ test "parse worktree porcelain output" {
     try std.testing.expectEqualStrings("main", items[0].branch);
     try std.testing.expect(!items[0].detached);
     try std.testing.expect(items[1].detached);
+}
+
+fn runGitForTest(allocator: std.mem.Allocator, io: std.Io, cwd: []const u8, argv: []const []const u8) !void {
+    const result = try std.process.run(allocator, io, .{
+        .argv = argv,
+        .cwd = .{ .path = cwd },
+        .stdout_limit = .limited(256 * 1024),
+        .stderr_limit = .limited(256 * 1024),
+    });
+    defer allocator.free(result.stdout);
+    defer allocator.free(result.stderr);
+    if (!isSuccess(result.term)) return error.GitCommandFailed;
 }
