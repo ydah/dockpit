@@ -1,0 +1,6 @@
+{
+  "name": "@dockpit/api",
+  "scripts": {
+    "test": "vitest run"
+  }
+}

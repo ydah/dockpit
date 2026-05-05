@@ -9,6 +9,7 @@ const markers = [_][]const u8{
     "justfile",
     "Justfile",
     "package.json",
+    "pnpm-workspace.yaml",
     "pnpm-lock.yaml",
     "yarn.lock",
     "bun.lock",

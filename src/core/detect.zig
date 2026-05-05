@@ -1,6 +1,7 @@
 const std = @import("std");
 
 const config = @import("config.zig");
+const detect_node = @import("detect_node.zig");
 const task = @import("task.zig");
 
 pub fn detectTasks(
@@ -52,7 +53,7 @@ fn detectAutoTasks(
     try detectZigTasks(allocator, io, project_root, tasks);
     try detectMakeTasks(allocator, io, project_root, tasks);
     try detectJustTasks(allocator, io, project_root, tasks);
-    try detectNpmTasks(allocator, io, project_root, tasks);
+    try detect_node.detect(allocator, io, project_root, tasks);
     try detectDenoTasks(allocator, io, project_root, tasks);
     try detectCargoTasks(allocator, io, project_root, tasks);
     try detectGoTasks(allocator, io, project_root, tasks);
@@ -179,202 +180,6 @@ fn detectJustTasks(
             .just,
         ));
     }
-}
-
-fn detectNpmTasks(
-    allocator: std.mem.Allocator,
-    io: std.Io,
-    project_root: []const u8,
-    tasks: *std.ArrayList(task.TaskSpec),
-) !void {
-    const contents = try readFirstProjectFile(allocator, io, project_root, &.{"package.json"}) orelse return;
-    defer allocator.free(contents);
-
-    var parsed = try std.json.parseFromSlice(std.json.Value, allocator, contents, .{});
-    defer parsed.deinit();
-
-    const root = parsed.value;
-    if (root != .object) return;
-    const scripts = root.object.get("scripts") orelse return;
-    if (scripts != .object) return;
-
-    const manager = try detectPackageManager(allocator, io, project_root, root);
-    try appendPackageScripts(allocator, tasks, scripts, project_root, manager.name, null, manager);
-    try detectNodeWorkspaceTasks(allocator, io, project_root, tasks, root, manager);
-}
-
-fn appendPackageScripts(
-    allocator: std.mem.Allocator,
-    tasks: *std.ArrayList(task.TaskSpec),
-    scripts: std.json.Value,
-    cwd: []const u8,
-    id_prefix: []const u8,
-    workspace_label: ?[]const u8,
-    manager: PackageManager,
-) !void {
-    if (scripts != .object) return;
-
-    var iterator = scripts.object.iterator();
-    while (iterator.next()) |entry| {
-        if (entry.value_ptr.* != .string) continue;
-
-        const name = entry.key_ptr.*;
-        const id = try prefixedId(allocator, id_prefix, name);
-        defer allocator.free(id);
-        const label = if (workspace_label) |label_name|
-            try std.fmt.allocPrint(allocator, "{s} run {s} ({s})", .{ manager.name, name, label_name })
-        else
-            try std.fmt.allocPrint(allocator, "{s} run {s}", .{ manager.name, name });
-        defer allocator.free(label);
-
-        if (manager.source == .yarn) {
-            try appendUniqueTask(allocator, tasks, try makeTask(
-                allocator,
-                id,
-                label,
-                &.{ "yarn", "run", name },
-                cwd,
-                manager.source,
-            ));
-        } else {
-            try appendUniqueTask(allocator, tasks, try makeTask(
-                allocator,
-                id,
-                label,
-                &.{ manager.name, "run", name },
-                cwd,
-                manager.source,
-            ));
-        }
-    }
-}
-
-const PackageManager = struct {
-    name: []const u8,
-    source: task.TaskSource,
-};
-
-fn detectPackageManager(
-    allocator: std.mem.Allocator,
-    io: std.Io,
-    project_root: []const u8,
-    package_json: std.json.Value,
-) !PackageManager {
-    if (package_json == .object) {
-        if (package_json.object.get("packageManager")) |value| {
-            if (value == .string) {
-                if (matchesPackageManager(value.string, "pnpm")) return .{ .name = "pnpm", .source = .pnpm };
-                if (matchesPackageManager(value.string, "yarn")) return .{ .name = "yarn", .source = .yarn };
-                if (matchesPackageManager(value.string, "bun")) return .{ .name = "bun", .source = .bun };
-                if (matchesPackageManager(value.string, "npm")) return .{ .name = "npm", .source = .npm };
-            }
-        }
-    }
-
-    if (try hasFile(allocator, io, project_root, "pnpm-lock.yaml")) return .{ .name = "pnpm", .source = .pnpm };
-    if (try hasFile(allocator, io, project_root, "yarn.lock")) return .{ .name = "yarn", .source = .yarn };
-    if (try hasAnyFile(allocator, io, project_root, &.{ "bun.lock", "bun.lockb" })) return .{ .name = "bun", .source = .bun };
-    return .{ .name = "npm", .source = .npm };
-}
-
-fn matchesPackageManager(value: []const u8, name: []const u8) bool {
-    if (std.mem.eql(u8, value, name)) return true;
-    return value.len > name.len and
-        std.mem.startsWith(u8, value, name) and
-        value[name.len] == '@';
-}
-
-fn detectNodeWorkspaceTasks(
-    allocator: std.mem.Allocator,
-    io: std.Io,
-    project_root: []const u8,
-    tasks: *std.ArrayList(task.TaskSpec),
-    package_json: std.json.Value,
-    manager: PackageManager,
-) !void {
-    if (package_json != .object) return;
-    const workspaces = package_json.object.get("workspaces") orelse return;
-
-    if (workspaces == .array) {
-        for (workspaces.array.items) |pattern_value| {
-            if (pattern_value != .string) continue;
-            try detectWorkspacePattern(allocator, io, project_root, tasks, pattern_value.string, manager);
-        }
-        return;
-    }
-
-    if (workspaces == .object) {
-        const packages = workspaces.object.get("packages") orelse return;
-        if (packages != .array) return;
-        for (packages.array.items) |pattern_value| {
-            if (pattern_value != .string) continue;
-            try detectWorkspacePattern(allocator, io, project_root, tasks, pattern_value.string, manager);
-        }
-    }
-}
-
-fn detectWorkspacePattern(
-    allocator: std.mem.Allocator,
-    io: std.Io,
-    project_root: []const u8,
-    tasks: *std.ArrayList(task.TaskSpec),
-    pattern: []const u8,
-    manager: PackageManager,
-) !void {
-    if (pattern.len == 0) return;
-    if (std.mem.endsWith(u8, pattern, "/*")) {
-        const base_pattern = pattern[0 .. pattern.len - "/*".len];
-        const base_path = try std.fs.path.join(allocator, &.{ project_root, base_pattern });
-        defer allocator.free(base_path);
-
-        var dir = std.Io.Dir.cwd().openDir(io, base_path, .{ .iterate = true }) catch return;
-        defer dir.close(io);
-        var iterator = dir.iterate();
-        while (try iterator.next(io)) |entry| {
-            if (entry.kind != .directory) continue;
-            const package_dir = try std.fs.path.join(allocator, &.{ base_path, entry.name });
-            defer allocator.free(package_dir);
-            try detectWorkspacePackage(allocator, io, package_dir, tasks, manager);
-        }
-        return;
-    }
-
-    const package_dir = try std.fs.path.join(allocator, &.{ project_root, pattern });
-    defer allocator.free(package_dir);
-    try detectWorkspacePackage(allocator, io, package_dir, tasks, manager);
-}
-
-fn detectWorkspacePackage(
-    allocator: std.mem.Allocator,
-    io: std.Io,
-    package_dir: []const u8,
-    tasks: *std.ArrayList(task.TaskSpec),
-    manager: PackageManager,
-) !void {
-    const path = try std.fs.path.join(allocator, &.{ package_dir, "package.json" });
-    defer allocator.free(path);
-
-    const contents = std.Io.Dir.cwd().readFileAlloc(io, path, allocator, .limited(1024 * 1024)) catch return;
-    defer allocator.free(contents);
-
-    var parsed = std.json.parseFromSlice(std.json.Value, allocator, contents, .{}) catch return;
-    defer parsed.deinit();
-
-    const root = parsed.value;
-    if (root != .object) return;
-    const scripts = root.object.get("scripts") orelse return;
-    if (scripts != .object) return;
-
-    const raw_name = if (root.object.get("name")) |name_value|
-        if (name_value == .string) name_value.string else std.fs.path.basename(package_dir)
-    else
-        std.fs.path.basename(package_dir);
-    const workspace_name = try sanitizeWorkspaceName(allocator, raw_name);
-    defer allocator.free(workspace_name);
-    const id_prefix = try std.fmt.allocPrint(allocator, "{s}-{s}", .{ manager.name, workspace_name });
-    defer allocator.free(id_prefix);
-
-    try appendPackageScripts(allocator, tasks, scripts, package_dir, id_prefix, raw_name, manager);
 }
 
 fn detectDenoTasks(
@@ -1043,26 +848,6 @@ fn trimOptionalQuotes(value: []const u8) []const u8 {
     return value;
 }
 
-fn sanitizeWorkspaceName(allocator: std.mem.Allocator, name: []const u8) ![]const u8 {
-    var out: std.ArrayList(u8) = .empty;
-    errdefer out.deinit(allocator);
-
-    for (name) |char| {
-        if (std.ascii.isAlphanumeric(char) or char == '_' or char == '.' or char == '-') {
-            try out.append(allocator, char);
-        } else if (char == '/') {
-            try out.append(allocator, '-');
-        } else if (char == '@') {
-            continue;
-        } else {
-            try out.append(allocator, '-');
-        }
-    }
-
-    if (out.items.len == 0) try out.appendSlice(allocator, "workspace");
-    return out.toOwnedSlice(allocator);
-}
-
 fn prefixedId(allocator: std.mem.Allocator, prefix: []const u8, name: []const u8) ![]const u8 {
     return std.fmt.allocPrint(allocator, "{s}-{s}", .{ prefix, name });
 }
@@ -1216,6 +1001,31 @@ test "detect package scripts in workspaces" {
     try std.testing.expectEqualStrings("dev", tasks[1].argv[2]);
     try std.testing.expect(std.mem.endsWith(u8, tasks[1].cwd, "packages/app"));
     try std.testing.expectEqualStrings("pnpm-dockpit-app-test", tasks[2].id);
+}
+
+test "detect package scripts from pnpm workspace file" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    const root = try std.Io.Dir.cwd().realPathFileAlloc(
+        std.testing.io,
+        "tests/fixtures/pnpm_workspace_file_project",
+        allocator,
+    );
+
+    const tasks = try detectTasks(allocator, std.testing.io, root, "missing.json");
+
+    try std.testing.expectEqual(@as(usize, 4), tasks.len);
+    try std.testing.expectEqualStrings("pnpm-lint", tasks[0].id);
+    try std.testing.expectEqualStrings("pnpm-dockpit-web-dev", tasks[1].id);
+    try std.testing.expectEqualStrings("pnpm", tasks[1].argv[0]);
+    try std.testing.expectEqualStrings("run", tasks[1].argv[1]);
+    try std.testing.expectEqualStrings("dev", tasks[1].argv[2]);
+    try std.testing.expect(std.mem.endsWith(u8, tasks[1].cwd, "apps/web"));
+    try std.testing.expectEqualStrings("pnpm-dockpit-web-test", tasks[2].id);
+    try std.testing.expectEqualStrings("pnpm-dockpit-api-test", tasks[3].id);
+    try std.testing.expect(std.mem.endsWith(u8, tasks[3].cwd, "packages/api"));
 }
 
 test "detect deno tasks" {
