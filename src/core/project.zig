@@ -17,6 +17,7 @@ const markers = [_][]const u8{
     "deno.json",
     "deno.jsonc",
     "Cargo.toml",
+    "go.work",
     "go.mod",
     "pyproject.toml",
     "requirements.txt",

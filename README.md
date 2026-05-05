@@ -149,8 +149,8 @@ Config `version` may be omitted for older files; supported explicit versions are
 | `package.json` | package scripts via `npm`, `pnpm`, `yarn`, or `bun`, inferred from `packageManager` or lockfiles |
 | npm/pnpm/yarn workspaces | workspace package scripts with each package directory as `cwd`, including `pnpm-workspace.yaml` patterns |
 | `deno.json` / `deno.jsonc` | `deno task <name>` |
-| `Cargo.toml` | `cargo build`, `cargo test`, `cargo run` |
-| `go.mod` | `go test ./...`, `go build ./...`, `go run .` |
+| `Cargo.toml` | `cargo build`, `cargo test`, `cargo run`, plus member tasks for `[workspace].members` |
+| `go.mod` / `go.work` | `go test ./...`, `go build ./...`, `go run .`, plus module tasks from `go.work use` |
 | `pyproject.toml` / `requirements.txt` / `setup.py` | `python -m pytest` |
 | `Gemfile` | `bundle exec rake test`, `bundle exec rspec` |
 | `flake.nix` | `nix flake check`, `nix build`, `nix develop` |

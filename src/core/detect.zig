@@ -226,7 +226,8 @@ fn detectCargoTasks(
     project_root: []const u8,
     tasks: *std.ArrayList(task.TaskSpec),
 ) !void {
-    if (!try hasFile(allocator, io, project_root, "Cargo.toml")) return;
+    const contents = try readFirstProjectFile(allocator, io, project_root, &.{"Cargo.toml"}) orelse return;
+    defer allocator.free(contents);
 
     try appendUniqueTask(allocator, tasks, try makeTask(
         allocator,
@@ -252,6 +253,16 @@ fn detectCargoTasks(
         project_root,
         .cargo,
     ));
+
+    var members: std.ArrayList([]const u8) = .empty;
+    defer {
+        for (members.items) |member| allocator.free(member);
+        members.deinit(allocator);
+    }
+    try collectCargoWorkspaceMembers(allocator, contents, &members);
+    for (members.items) |member| {
+        try detectCargoWorkspaceMember(allocator, io, project_root, tasks, member);
+    }
 }
 
 fn detectGoTasks(
@@ -260,32 +271,126 @@ fn detectGoTasks(
     project_root: []const u8,
     tasks: *std.ArrayList(task.TaskSpec),
 ) !void {
-    if (!try hasFile(allocator, io, project_root, "go.mod")) return;
+    const has_go_mod = try hasFile(allocator, io, project_root, "go.mod");
+    if (has_go_mod) try appendGoTasks(allocator, tasks, "go", project_root, null);
 
-    try appendUniqueTask(allocator, tasks, try makeTask(
-        allocator,
-        "go-test",
-        "go test ./...",
-        &.{ "go", "test", "./..." },
-        project_root,
-        .go,
-    ));
-    try appendUniqueTask(allocator, tasks, try makeTask(
-        allocator,
-        "go-build",
-        "go build ./...",
-        &.{ "go", "build", "./..." },
-        project_root,
-        .go,
-    ));
-    try appendUniqueTask(allocator, tasks, try makeTask(
-        allocator,
-        "go-run",
-        "go run .",
-        &.{ "go", "run", "." },
-        project_root,
-        .go,
-    ));
+    const contents = try readFirstProjectFile(allocator, io, project_root, &.{"go.work"}) orelse return;
+    defer allocator.free(contents);
+
+    var modules: std.ArrayList([]const u8) = .empty;
+    defer {
+        for (modules.items) |module| allocator.free(module);
+        modules.deinit(allocator);
+    }
+    try collectGoWorkspaceUses(allocator, contents, &modules);
+    for (modules.items) |module| {
+        try detectGoWorkspaceModule(allocator, io, project_root, tasks, module);
+    }
+}
+
+fn detectCargoWorkspaceMember(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    project_root: []const u8,
+    tasks: *std.ArrayList(task.TaskSpec),
+    member: []const u8,
+) !void {
+    if (std.mem.endsWith(u8, member, "/*")) {
+        const base_member = member[0 .. member.len - "/*".len];
+        const base_path = try std.fs.path.join(allocator, &.{ project_root, base_member });
+        defer allocator.free(base_path);
+
+        var dir = std.Io.Dir.cwd().openDir(io, base_path, .{ .iterate = true }) catch return;
+        defer dir.close(io);
+        var iterator = dir.iterate();
+        while (try iterator.next(io)) |entry| {
+            if (entry.kind != .directory) continue;
+            const nested_member = try std.fs.path.join(allocator, &.{ base_member, entry.name });
+            defer allocator.free(nested_member);
+            try detectCargoWorkspaceMember(allocator, io, project_root, tasks, nested_member);
+        }
+        return;
+    }
+
+    const member_path = try std.fs.path.join(allocator, &.{ project_root, member });
+    defer allocator.free(member_path);
+    if (!try hasFile(allocator, io, member_path, "Cargo.toml")) return;
+
+    const suffix = try workspaceSuffix(allocator, member);
+    defer allocator.free(suffix);
+    const prefix = try std.fmt.allocPrint(allocator, "cargo-{s}", .{suffix});
+    defer allocator.free(prefix);
+
+    const build_id = try prefixedId(allocator, prefix, "build");
+    defer allocator.free(build_id);
+    const build_label = try std.fmt.allocPrint(allocator, "cargo build ({s})", .{member});
+    defer allocator.free(build_label);
+    try appendUniqueTask(allocator, tasks, try makeTask(allocator, build_id, build_label, &.{ "cargo", "build" }, member_path, .cargo));
+
+    const test_id = try prefixedId(allocator, prefix, "test");
+    defer allocator.free(test_id);
+    const test_label = try std.fmt.allocPrint(allocator, "cargo test ({s})", .{member});
+    defer allocator.free(test_label);
+    try appendUniqueTask(allocator, tasks, try makeTask(allocator, test_id, test_label, &.{ "cargo", "test" }, member_path, .cargo));
+
+    const run_id = try prefixedId(allocator, prefix, "run");
+    defer allocator.free(run_id);
+    const run_label = try std.fmt.allocPrint(allocator, "cargo run ({s})", .{member});
+    defer allocator.free(run_label);
+    try appendUniqueTask(allocator, tasks, try makeTask(allocator, run_id, run_label, &.{ "cargo", "run" }, member_path, .cargo));
+}
+
+fn detectGoWorkspaceModule(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    project_root: []const u8,
+    tasks: *std.ArrayList(task.TaskSpec),
+    module: []const u8,
+) !void {
+    const module_path = try std.fs.path.join(allocator, &.{ project_root, module });
+    defer allocator.free(module_path);
+    if (!try hasFile(allocator, io, module_path, "go.mod")) return;
+
+    const suffix = try workspaceSuffix(allocator, module);
+    defer allocator.free(suffix);
+    const prefix = try std.fmt.allocPrint(allocator, "go-{s}", .{suffix});
+    defer allocator.free(prefix);
+    try appendGoTasks(allocator, tasks, prefix, module_path, module);
+}
+
+fn appendGoTasks(
+    allocator: std.mem.Allocator,
+    tasks: *std.ArrayList(task.TaskSpec),
+    id_prefix: []const u8,
+    cwd: []const u8,
+    workspace_label: ?[]const u8,
+) !void {
+    const test_label = if (workspace_label) |label|
+        try std.fmt.allocPrint(allocator, "go test ./... ({s})", .{label})
+    else
+        try allocator.dupe(u8, "go test ./...");
+    defer allocator.free(test_label);
+    const test_id = try prefixedId(allocator, id_prefix, "test");
+    defer allocator.free(test_id);
+    try appendUniqueTask(allocator, tasks, try makeTask(allocator, test_id, test_label, &.{ "go", "test", "./..." }, cwd, .go));
+
+    const build_label = if (workspace_label) |label|
+        try std.fmt.allocPrint(allocator, "go build ./... ({s})", .{label})
+    else
+        try allocator.dupe(u8, "go build ./...");
+    defer allocator.free(build_label);
+    const build_id = try prefixedId(allocator, id_prefix, "build");
+    defer allocator.free(build_id);
+    try appendUniqueTask(allocator, tasks, try makeTask(allocator, build_id, build_label, &.{ "go", "build", "./..." }, cwd, .go));
+
+    const run_label = if (workspace_label) |label|
+        try std.fmt.allocPrint(allocator, "go run . ({s})", .{label})
+    else
+        try allocator.dupe(u8, "go run .");
+    defer allocator.free(run_label);
+    const run_id = try prefixedId(allocator, id_prefix, "run");
+    defer allocator.free(run_id);
+    try appendUniqueTask(allocator, tasks, try makeTask(allocator, run_id, run_label, &.{ "go", "run", "." }, cwd, .go));
 }
 
 fn detectPythonTasks(
@@ -673,6 +778,115 @@ fn collectZigBuildSteps(
     }
 }
 
+fn collectCargoWorkspaceMembers(
+    allocator: std.mem.Allocator,
+    contents: []const u8,
+    members: *std.ArrayList([]const u8),
+) !void {
+    var in_workspace = false;
+    var in_members_array = false;
+
+    var lines = std.mem.splitScalar(u8, contents, '\n');
+    while (lines.next()) |raw_line| {
+        const line = stripLineComment(std.mem.trim(u8, raw_line, " \t\r"), '#');
+        if (line.len == 0) continue;
+
+        if (line[0] == '[') {
+            in_workspace = std.mem.eql(u8, line, "[workspace]");
+            in_members_array = false;
+            continue;
+        }
+
+        if (!in_workspace) continue;
+        if (in_members_array) {
+            const closed = try collectStringArrayItems(allocator, line, members);
+            if (closed) in_members_array = false;
+            continue;
+        }
+
+        const equals_index = std.mem.indexOfScalar(u8, line, '=') orelse continue;
+        const key = std.mem.trim(u8, line[0..equals_index], " \t");
+        if (!std.mem.eql(u8, key, "members")) continue;
+        const rest = std.mem.trim(u8, line[equals_index + 1 ..], " \t");
+        if (std.mem.indexOfScalar(u8, rest, '[') == null) continue;
+        const closed = try collectStringArrayItems(allocator, rest, members);
+        in_members_array = !closed;
+    }
+}
+
+fn collectGoWorkspaceUses(
+    allocator: std.mem.Allocator,
+    contents: []const u8,
+    modules: *std.ArrayList([]const u8),
+) !void {
+    var in_use_block = false;
+
+    var lines = std.mem.splitScalar(u8, contents, '\n');
+    while (lines.next()) |raw_line| {
+        const line = stripLineComment(std.mem.trim(u8, raw_line, " \t\r"), '#');
+        if (line.len == 0) continue;
+
+        if (in_use_block) {
+            if (std.mem.indexOfScalar(u8, line, ')') != null) {
+                in_use_block = false;
+                continue;
+            }
+            try appendWorkspacePath(allocator, modules, line);
+            continue;
+        }
+
+        if (!std.mem.startsWith(u8, line, "use")) continue;
+        const rest = std.mem.trim(u8, line["use".len..], " \t");
+        if (std.mem.startsWith(u8, rest, "(")) {
+            in_use_block = std.mem.indexOfScalar(u8, rest, ')') == null;
+            const inline_rest = std.mem.trim(u8, rest[1..], " \t");
+            if (inline_rest.len > 0 and inline_rest[0] != ')') {
+                const end = std.mem.indexOfScalar(u8, inline_rest, ')') orelse inline_rest.len;
+                try appendWorkspacePath(allocator, modules, std.mem.trim(u8, inline_rest[0..end], " \t"));
+            }
+            continue;
+        }
+        try appendWorkspacePath(allocator, modules, rest);
+    }
+}
+
+fn collectStringArrayItems(
+    allocator: std.mem.Allocator,
+    line: []const u8,
+    out: *std.ArrayList([]const u8),
+) !bool {
+    var cursor: usize = 0;
+    var closed = false;
+    while (cursor < line.len) : (cursor += 1) {
+        const char = line[cursor];
+        if (char == ']') {
+            closed = true;
+            break;
+        }
+        if (char != '"' and char != '\'') continue;
+        const quote = char;
+        cursor += 1;
+        const start = cursor;
+        while (cursor < line.len and line[cursor] != quote) : (cursor += 1) {}
+        if (cursor >= line.len) break;
+        const value = line[start..cursor];
+        try appendWorkspacePath(allocator, out, value);
+    }
+    return closed;
+}
+
+fn appendWorkspacePath(
+    allocator: std.mem.Allocator,
+    out: *std.ArrayList([]const u8),
+    raw_value: []const u8,
+) !void {
+    const trimmed = std.mem.trim(u8, trimOptionalQuotes(raw_value), " \t,");
+    if (trimmed.len == 0 or trimmed[0] == '!') return;
+    if (std.fs.path.isAbsolute(trimmed)) return;
+    if (std.mem.indexOf(u8, trimmed, "..") != null) return;
+    try appendUniqueName(allocator, out, trimmed);
+}
+
 fn collectYamlSectionKeys(
     allocator: std.mem.Allocator,
     contents: []const u8,
@@ -846,6 +1060,39 @@ fn trimOptionalQuotes(value: []const u8) []const u8 {
         return value[1 .. value.len - 1];
     }
     return value;
+}
+
+fn stripLineComment(line: []const u8, marker: u8) []const u8 {
+    var quote: ?u8 = null;
+    for (line, 0..) |char, index| {
+        if (quote) |active| {
+            if (char == active) quote = null;
+            continue;
+        }
+        if (char == '"' or char == '\'') {
+            quote = char;
+            continue;
+        }
+        if (char == marker) return std.mem.trim(u8, line[0..index], " \t");
+    }
+    return line;
+}
+
+fn workspaceSuffix(allocator: std.mem.Allocator, path: []const u8) ![]const u8 {
+    var out: std.ArrayList(u8) = .empty;
+    errdefer out.deinit(allocator);
+
+    for (path) |char| {
+        const mapped = switch (char) {
+            'a'...'z', 'A'...'Z', '0'...'9' => std.ascii.toLower(char),
+            else => '-',
+        };
+        if (mapped == '-' and (out.items.len == 0 or out.items[out.items.len - 1] == '-')) continue;
+        try out.append(allocator, mapped);
+    }
+    while (out.items.len > 0 and out.items[out.items.len - 1] == '-') _ = out.pop();
+    if (out.items.len == 0) try out.appendSlice(allocator, "workspace");
+    return out.toOwnedSlice(allocator);
 }
 
 fn prefixedId(allocator: std.mem.Allocator, prefix: []const u8, name: []const u8) ![]const u8 {
@@ -1069,6 +1316,37 @@ test "detect cargo tasks" {
     try std.testing.expectEqualStrings("cargo-run", tasks[2].id);
 }
 
+test "detect cargo workspace member tasks" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    const root = try std.Io.Dir.cwd().realPathFileAlloc(
+        std.testing.io,
+        "tests/fixtures/cargo_workspace_project",
+        allocator,
+    );
+
+    const tasks = try detectTasks(allocator, std.testing.io, root, "missing.json");
+
+    try std.testing.expectEqual(@as(usize, 9), tasks.len);
+    try std.testing.expectEqualStrings("cargo-build", tasks[0].id);
+    var found_cli = false;
+    var found_core = false;
+    for (tasks) |item| {
+        if (std.mem.eql(u8, item.id, "cargo-crates-cli-build")) {
+            found_cli = true;
+            try std.testing.expect(std.mem.endsWith(u8, item.cwd, "crates/cli"));
+        }
+        if (std.mem.eql(u8, item.id, "cargo-crates-core-run")) {
+            found_core = true;
+            try std.testing.expect(std.mem.endsWith(u8, item.cwd, "crates/core"));
+        }
+    }
+    try std.testing.expect(found_cli);
+    try std.testing.expect(found_core);
+}
+
 test "detect go tasks" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
@@ -1086,6 +1364,27 @@ test "detect go tasks" {
     try std.testing.expectEqualStrings("go-test", tasks[0].id);
     try std.testing.expectEqualStrings("go-build", tasks[1].id);
     try std.testing.expectEqualStrings("go-run", tasks[2].id);
+}
+
+test "detect go workspace module tasks" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    const root = try std.Io.Dir.cwd().realPathFileAlloc(
+        std.testing.io,
+        "tests/fixtures/go_workspace_project",
+        allocator,
+    );
+
+    const tasks = try detectTasks(allocator, std.testing.io, root, "missing.json");
+
+    try std.testing.expectEqual(@as(usize, 6), tasks.len);
+    try std.testing.expectEqualStrings("go-services-api-test", tasks[0].id);
+    try std.testing.expectEqualStrings("go", tasks[0].argv[0]);
+    try std.testing.expectEqualStrings("test", tasks[0].argv[1]);
+    try std.testing.expect(std.mem.endsWith(u8, tasks[0].cwd, "services/api"));
+    try std.testing.expectEqualStrings("go-tools-worker-run", tasks[5].id);
 }
 
 test "detect python tasks" {

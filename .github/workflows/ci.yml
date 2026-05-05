@@ -66,6 +66,14 @@ jobs:
       - name: Smoke Fixture Detection
         run: zig build run -- --project-dir tests/fixtures/pnpm_project --print-tasks
 
+      - name: Smoke Cargo Workspace Detection
+        run: |
+          zig build run -- --project-dir tests/fixtures/cargo_workspace_project --print-tasks --json | grep '"cargo-crates-cli-test"'
+
+      - name: Smoke Go Workspace Detection
+        run: |
+          zig build run -- --project-dir tests/fixtures/go_workspace_project --print-tasks --json | grep '"go-tools-worker-run"'
+
       - name: Smoke History JSON
         run: zig build run -- --project-dir tests/fixtures/config_project --history --json
 
