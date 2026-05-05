@@ -880,7 +880,10 @@ fn appendWorkspacePath(
     out: *std.ArrayList([]const u8),
     raw_value: []const u8,
 ) !void {
-    const trimmed = std.mem.trim(u8, trimOptionalQuotes(raw_value), " \t,");
+    var trimmed = std.mem.trim(u8, trimOptionalQuotes(raw_value), " \t,");
+    while (std.mem.startsWith(u8, trimmed, "./")) {
+        trimmed = trimmed[2..];
+    }
     if (trimmed.len == 0 or trimmed[0] == '!') return;
     if (std.fs.path.isAbsolute(trimmed)) return;
     if (std.mem.indexOf(u8, trimmed, "..") != null) return;
