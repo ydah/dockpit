@@ -4,9 +4,10 @@
 
 A modern project cockpit for running development tasks from a visual terminal UI, built in Zig.
 
-[Key Features](#key-features) - [Usage](#usage) - [Install](#install) - [Customize](#customize) - [FAQ](#faq)
+[Key Features](#key-features) - [Usage](#usage) - [Install](#install) - [Customize](#customize) - [FAQ](#faq) - [License](#license)
 
 [![CI](https://github.com/ydah/dockpit/actions/workflows/ci.yml/badge.svg)](https://github.com/ydah/dockpit/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![GitHub release](https://img.shields.io/github/v/release/ydah/dockpit)](https://github.com/ydah/dockpit/releases)
 [![Zig 0.16.0](https://img.shields.io/badge/Zig-0.16.0-f7a41d.svg)](https://ziglang.org/)
 
@@ -398,3 +399,7 @@ zig build run -- --history --json
 
 - [libvaxis](https://github.com/rockorager/libvaxis) for the TUI foundation.
 - Zig's standard library for process execution, JSON parsing, and portable IO.
+
+## License
+
+MIT. See [LICENSE](LICENSE).
