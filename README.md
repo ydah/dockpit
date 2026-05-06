@@ -1,76 +1,143 @@
+<div align="center">
+
 # dockpit
 
-`dockpit` is a Zig TUI project cockpit for local development workflows.
+A modern project cockpit for running development tasks from a visual terminal UI, built in Zig.
 
-`dockpit` discovers common project tasks, runs them without shell-string execution, and shows command output plus Git/worktree status in one terminal screen.
+[Key Features](#key-features) - [Usage](#usage) - [Install](#install) - [Customize](#customize) - [FAQ](#faq)
 
-## Install
+[![CI](https://github.com/ydah/dockpit/actions/workflows/ci.yml/badge.svg)](https://github.com/ydah/dockpit/actions/workflows/ci.yml)
+[![GitHub release](https://img.shields.io/github/v/release/ydah/dockpit)](https://github.com/ydah/dockpit/releases)
+[![Zig 0.16.0](https://img.shields.io/badge/Zig-0.16.0-f7a41d.svg)](https://ziglang.org/)
 
-This project targets Zig 0.16.0.
+</div>
+
+`dockpit` discovers common project tasks, runs them without shell-string execution, and keeps command output, Git status, file changes, worktrees, jobs, and run history in one terminal workspace.
+
+---
+
+## Key Features
+
+### Visual Task Cockpit
+
+Launch `dockpit` in a project and get a focused task list, streaming output pane, Git summary, and compact status bar.
 
 ```sh
-zig build
+dockpit
 ```
 
-The executable is installed at `zig-out/bin/dockpit`.
+Tasks can be selected, searched, rerun, cancelled, inspected, and watched for file changes without leaving the TUI.
+
+### Smart Task Detection
+
+`dockpit` detects common build, test, run, and service commands from project files.
+
+| Ecosystem | Detected tasks |
+| --- | --- |
+| Zig | `zig build`, `zig build test`, simple `b.step("name", ...)` steps |
+| Node | `npm`, `pnpm`, `yarn`, or `bun` package scripts |
+| Workspaces | npm/pnpm/yarn workspaces, `pnpm-workspace.yaml`, Cargo workspace members, `go.work` modules |
+| Rust | `cargo build`, `cargo test`, `cargo run` |
+| Go | `go test ./...`, `go build ./...`, `go run .` |
+| Make / just / Taskfile / mise | Simple targets, recipes, tasks, and mise tasks |
+| Python / Ruby / Nix | `pytest`, Bundler test commands, Nix flake commands |
+| Docker Compose | Stack commands plus service up/restart/logs/build tasks |
+
+### Streaming Runner
+
+Tasks run through argv arrays with `std.process.Child`, never through shell strings. Output streams into the TUI while commands run in background threads.
+
+```sh
+dockpit --run zig-build
+dockpit --run npm-test --env NODE_ENV=test
+```
+
+Configured tasks can set environment variables, choose whether to inherit the parent environment, and apply timeout/output limits.
+
+### Git Changes and Worktrees
+
+Inspect repository state without leaving the app.
+
+| Key | Action |
+| --- | --- |
+| `g` | Refresh Git status |
+| `f` | Open changed files |
+| `Space` | Stage or unstage the selected file |
+| `Enter` | Append a diff to the output pane |
+| `D` twice | Discard the selected change with confirmation |
+| `t` | Show Git worktrees |
+
+Untracked file deletion is confirmation-backed.
+
+### Run History
+
+Per-project run history is stored in `.dockpit/history.log` and can be reviewed from the TUI or CLI.
+
+```sh
+dockpit --history
+dockpit --history --history-status failed --history-limit 10
+dockpit --history --json
+```
+
+Inside the TUI, use `h` for history, `a`/`s`/`e`/`S` to filter all/success/failed/signal entries, `i` for details, and `C` twice to clear history.
+
+### Command Palette and Search
+
+Use `/` for fuzzy task search, `:` for the command palette, and output focus plus `/` to search logs.
+
+---
 
 ## Usage
 
-Start the TUI in the current project:
+### Basic Commands
 
 ```sh
-zig build run
+# Start the TUI in the current project
+dockpit
+
+# Print detected tasks
+dockpit --print-tasks
+dockpit --print-tasks --json
+
+# Run one task without the TUI
+dockpit --run zig-build
+
+# Use another project root
+dockpit --project-dir ../my-project --print-tasks
 ```
 
-Print detected tasks without starting the TUI:
+### History Commands
 
 ```sh
-zig build run -- --print-tasks
-zig build run -- --print-tasks --json
+# Print recent runs
+dockpit --history
+
+# Filter history
+dockpit --history --history-status failed --history-limit 10
+dockpit --history-task zig-test
+
+# Clear stored history
+dockpit --clear-history
 ```
 
-Use a different project directory:
+### Validation and Git Options
 
 ```sh
-zig build run -- --project-dir ../my-project --print-tasks
+# Disable Git discovery
+dockpit --no-git
+
+# Fail on invalid config instead of falling back to auto detection
+dockpit --strict-config --print-tasks
 ```
 
-Run a task without starting the TUI:
-
-```sh
-zig build run -- --run zig-build
-zig build run -- --run npm-test --env NODE_ENV=test
-```
-
-Print or clear recent run history:
-
-```sh
-zig build run -- --history --history-status failed --history-limit 10
-zig build run -- --history --json
-zig build run -- --clear-history
-```
-
-Disable Git status discovery:
-
-```sh
-zig build run -- --no-git
-```
-
-Treat invalid configuration as an error instead of falling back to auto detection:
-
-```sh
-zig build run -- --strict-config --print-tasks
-```
-
-## Key Bindings
+### TUI Key Bindings
 
 | Key | Action |
-|---|---|
-| `q` / `Ctrl+C` | Quit when no task is running |
-| `j` / `Down` | Select next task |
-| `k` / `Up` | Select previous task |
+| --- | --- |
 | `Enter` | Run selected task |
-| `/` | Fuzzy-search tasks; with output focused, search output |
+| `j` / `Down` | Select next task or scroll output |
+| `k` / `Up` | Select previous task or scroll output |
+| `/` | Search tasks; with output focused, search output |
 | `:` | Open command palette |
 | `r` | Rerun the last task |
 | `x` | Cancel the newest running task |
@@ -84,15 +151,50 @@ zig build run -- --strict-config --print-tasks
 | `w` | Toggle file-watch rerun |
 | `Tab` | Switch focus between tasks and output |
 | `?` | Show help |
+| `q` / `Ctrl+C` | Quit when no task is running |
 
-## Configuration
+---
 
-Create `.dockpit.json` in the project root:
+## Install
+
+### Build from source
+
+This project targets Zig 0.16.0.
+
+```sh
+git clone https://github.com/ydah/dockpit.git
+cd dockpit
+zig build -Doptimize=ReleaseSafe
+```
+
+The executable is installed at:
+
+```sh
+zig-out/bin/dockpit
+```
+
+### Development run
+
+```sh
+zig build run
+```
+
+### Release artifacts
+
+Tagged releases are built by GitHub Actions for Linux and macOS, with SHA-256 checksum files attached.
+
+---
+
+## Customize
+
+### Config File
+
+Create `.dockpit.json` in the project root.
 
 ```json
 {
-  "theme": "high-contrast",
   "version": 3,
+  "theme": "high-contrast",
   "default_task": "dev",
   "default_group": "project",
   "runner": {
@@ -132,43 +234,146 @@ Create `.dockpit.json` in the project root:
 }
 ```
 
-`cmd` must be a non-empty argv array. `dockpit` does not run user-configured commands through a shell. Task metadata fields are optional: `description`, `group`, `default`, `watch`, `inherit_env`, `timeout_ms`, and `max_output_bytes`.
+### Task Fields
 
-Config `version` may be omitted for older files; supported explicit versions are `1`, `2`, and `3`. `runner` provides defaults for all configured tasks, and task-level values override those defaults. Configured task ids must be unique, only one task can set `default: true`, and a root `default_task` must point to an existing task. Keybindings cannot collide. Supported themes are `default`, `dark`, `light`, and `high-contrast`. Keybinding names include `run`, `rerun`, `cancel`, `clear`, `git`, `changes`, `worktrees`, `details`, `jobs`, `history`, `watch`, `search`, `palette`, `focus`, `help`, and `quit`.
+| Field | Description |
+| --- | --- |
+| `id` | Unique task id |
+| `label` | Display label; defaults to `id` |
+| `cmd` | Required argv array |
+| `cwd` | Working directory; defaults to project root |
+| `env` | Extra environment values |
+| `description` | Detail text shown in the TUI |
+| `group` | Task group label |
+| `default` | Marks the default task; only one task may set it |
+| `watch` | Enables or disables file-watch rerun for the task |
+| `inherit_env` | Uses the parent process environment when true |
+| `timeout_ms` | Kills the task after this duration |
+| `max_output_bytes` | Maximum stdout or stderr capture size |
+
+`cmd` must be a non-empty argv array. User-configured commands are not executed through a shell.
+
+### Themes
+
+Built-in themes:
+
+| Theme | Notes |
+| --- | --- |
+| `default` | Terminal-native styling |
+| `dark` | Low-contrast dark terminal palette |
+| `light` | Light terminal palette |
+| `high-contrast` | Strong selection and status styling |
+
+### Keybinding Names
+
+Configurable keybinding names include:
+
+```text
+run, rerun, cancel, clear, git, changes, worktrees, details,
+jobs, history, watch, search, palette, focus, help, quit
+```
+
+Keybindings must be unique.
+
+---
 
 ## Auto Detection
 
-`dockpit` detects tasks from these files in the project root:
+`dockpit` detects tasks from these project markers:
 
 | File | Tasks |
-|---|---|
-| `.dockpit.json` | configured tasks |
-| `build.zig` | `zig build`, `zig build test`, and simple `b.step("name", ...)` build steps |
+| --- | --- |
+| `.dockpit.json` | Configured tasks |
+| `build.zig` | Zig build/test and simple build steps |
 | `Makefile` / `makefile` | `.PHONY` targets or simple targets |
-| `justfile` / `Justfile` | simple recipes without arguments |
-| `package.json` | package scripts via `npm`, `pnpm`, `yarn`, or `bun`, inferred from `packageManager` or lockfiles |
-| npm/pnpm/yarn workspaces | workspace package scripts with each package directory as `cwd`, including `pnpm-workspace.yaml` patterns |
+| `justfile` / `Justfile` | Simple recipes without arguments |
+| `package.json` | Package scripts through npm/pnpm/yarn/bun |
+| `pnpm-workspace.yaml` | Workspace package scripts |
 | `deno.json` / `deno.jsonc` | `deno task <name>` |
-| `Cargo.toml` | `cargo build`, `cargo test`, `cargo run`, plus member tasks for `[workspace].members` |
-| `go.mod` / `go.work` | `go test ./...`, `go build ./...`, `go run .`, plus module tasks from `go.work use` |
+| `Cargo.toml` | Cargo root and workspace member tasks |
+| `go.mod` / `go.work` | Go module and workspace tasks |
 | `pyproject.toml` / `requirements.txt` / `setup.py` | `python -m pytest` |
-| `Gemfile` | `bundle exec rake test`, `bundle exec rspec` |
-| `flake.nix` | `nix flake check`, `nix build`, `nix develop` |
-| `Taskfile.yml` / `Taskfile.yaml` | `task <name>` |
-| `mise.toml` / `.mise.toml` | `mise run <name>` |
-| `compose.yaml` / `compose.yml` / `docker-compose.yml` / `docker-compose.yaml` | Docker Compose up/down/ps/logs plus service up/restart/logs/build tasks |
+| `Gemfile` | Bundler test commands |
+| `flake.nix` | Nix flake commands |
+| `Taskfile.yml` / `Taskfile.yaml` | Taskfile tasks |
+| `mise.toml` / `.mise.toml` | mise tasks |
+| Compose YAML files | Docker Compose stack and service tasks |
 
-## Runtime Notes
+---
 
-- Multiple tasks can run concurrently in background threads.
-- TUI task output streams while tasks are running.
-- `x` requests cancellation and terminates the child process for running background tasks.
-- The Git changes view supports `Space` to stage or unstage the selected file, `Enter` to append a diff to output, and `D` twice to discard the selected change. Untracked file deletion is also confirmation-backed.
-- The history view supports `a`/`s`/`e`/`S` filters for all/success/failed/signal entries, `i` for details, and `C` twice to clear stored history.
-- File watching uses a portable polling snapshot, honors each task's `watch` flag, and ignores generated directories such as `.git`, `.zig-cache`, `zig-out`, `node_modules`, `target`, and `.dockpit`.
-- Per-project run history is stored in `.dockpit/history.log`.
-- Interactive commands should be exposed as non-interactive tasks; dockpit does not allocate a PTY.
-- Release builds are produced by the tag-triggered GitHub Actions release workflow for Linux and macOS, with SHA-256 checksum files attached.
+## FAQ
+
+### A command is missing from the task list
+
+Add it explicitly to `.dockpit.json`.
+
+```json
+{
+  "tasks": [
+    {
+      "id": "fmt",
+      "cmd": ["zig", "fmt", "."]
+    }
+  ]
+}
+```
+
+### My config is invalid but dockpit still starts
+
+By default, invalid config falls back to auto detection. Use strict mode when validating config:
+
+```sh
+dockpit --strict-config --print-tasks
+```
+
+### Can dockpit run shell snippets?
+
+No. `cmd` is an argv array by design. Use a script file if you need shell features, then call that script from `cmd`.
+
+```json
+{
+  "id": "deploy",
+  "cmd": ["./script/deploy.sh"]
+}
+```
+
+### Where is run history stored?
+
+In the project root:
+
+```text
+.dockpit/history.log
+```
+
+### How do I reset history?
+
+```sh
+dockpit --clear-history
+```
+
+### TUI output is too large
+
+Set a task or runner limit:
+
+```json
+{
+  "runner": {
+    "max_output_bytes": 16777216
+  }
+}
+```
+
+---
+
+## Project Goals
+
+- Fast startup with useful zero-config task discovery.
+- Visual-first local development workflow in one terminal screen.
+- Safe command execution through argv arrays, not shell strings.
+- Core logic that stays independent from the TUI.
+- Practical Git, history, watch, and workspace support without heavyweight dependencies.
+
+---
 
 ## Development
 
@@ -178,3 +383,18 @@ zig build test
 zig build
 zig build -Doptimize=ReleaseSafe
 ```
+
+Useful smoke checks:
+
+```sh
+zig build run -- --print-tasks
+zig build run -- --project-dir tests/fixtures/pnpm_workspace_file_project --print-tasks --json
+zig build run -- --history --json
+```
+
+---
+
+## Credits
+
+- [libvaxis](https://github.com/rockorager/libvaxis) for the TUI foundation.
+- Zig's standard library for process execution, JSON parsing, and portable IO.
